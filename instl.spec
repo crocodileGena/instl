@@ -64,22 +64,16 @@ for help_file in os.listdir(instl_help_path):
 pyz = PYZ(a.pure, a.zipped_data,
              cipher=block_cipher)
 
-
 exe = EXE(pyz,
           a.scripts,
-          [],
           exclude_binaries=True,
           name='instl',
           debug=False,
-          bootloader_ignore_signals=False,
-          strip=False,
-          upx=True,
-          console=True,
-          disable_windowed_traceback=False,
-          target_arch='arm64',
-          codesign_identity=None,
-          entitlements_file=None )
-
+          strip=None,
+          target_arch='universal2',
+          upx=False, # does not work even if True
+          runtime_tmpdir="runtime_tmpdir",
+          console=True )
 coll = COLLECT(exe,
                a.binaries,
                a.zipfiles,
