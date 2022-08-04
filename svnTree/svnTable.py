@@ -1177,6 +1177,19 @@ class SVNTable(object):
             num_required_files = self.mark_required_for_file(source_path)
         return num_required_files
 
+    def get_main_bundles(self,level=3) -> List[str]:
+        """ get bundles names from staging folder
+        """
+        query_text = f"""
+            SELECT path,leaf,parent,level
+            FROM svn_item_t
+            WHERE leaf like '%.bundle'
+            AND parent like '%plugins'
+            AND level={level}
+            """
+        retVal = self.db.select_and_fetchall(query_text)
+        return retVal
+
     def mark_required_completion(self, progress_callback=None) -> int:
         """ after some files were marked as required,
             mark their parent dirs are required as well
