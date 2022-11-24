@@ -4,6 +4,7 @@
 import os
 import abc
 import itertools
+import re
 from pathlib import Path, PurePath
 import sys
 import functools
@@ -13,6 +14,31 @@ log = logging.getLogger()
 import utils
 from configVar import config_vars  # √
 from . import connectionBase
+
+
+def create_options_file(config_file_path):
+    connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
+    max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
+    retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
+    retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
+    sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
+
+    file_name = '-'.join((os.fspath(config_file_path), 'opt'))
+
+    file = utils.utf8_open_for_write(file_name, "w")
+    file_header_text = f"""
+    header=Cookie: {sync_urls_cookie}
+    #download-result=hide
+    #console-log-level=error
+    connect-timeout={connect_time_out}
+    timeout={max_time}
+    max-tries={retries}
+    retry-wait={retry_delay}
+    """
+    file.write(file_header_text)
+    file.close()
+
+    return file_name
 
 
 class CUrlHelper(object, metaclass=abc.ABCMeta):
@@ -81,12 +107,12 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
         file_name_list = list()
 
         if self.get_num_urls_to_download() > 0:
-            connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
-            max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
-            retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
-            retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
-
-            sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
+            # connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
+            # max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
+            # retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
+            # retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
+            #
+            # sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
 
             actual_num_config_files = int(max(0, min(len(self.urls_to_download), num_config_files)))
             if self.urls_to_download_last:
@@ -101,31 +127,31 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
                 wfd_list.append(wfd)
 
             # write the header in each file
-            for wfd in wfd_list:
-                basename = os.path.basename(wfd.name)
-                if sync_urls_cookie:
-                    cookie_text = f"cookie = {sync_urls_cookie}\n"
-                else:
-                    cookie_text = ""
-                curl_write_out_str = CUrlHelper.curl_write_out_str
-                file_header_text = f"""
-insecure
-raw
-fail
-silent
-show-error
-compressed
-create-dirs
-connect-timeout = {connect_time_out}
-max-time = {max_time}
-retry = {retries}
-retry-delay = {retry_delay}
-{cookie_text}
-write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
-
-
-"""
-                wfd.write(file_header_text)
+            # for wfd in wfd_list:
+                # basename = os.path.basename(wfd.name)
+                # if sync_urls_cookie:
+                #     cookie_text = f"cookie = {sync_urls_cookie}\n"
+                # else:
+                #     cookie_text = ""
+                # curl_write_out_str = CUrlHelper.curl_write_out_str
+#                 file_header_text = f"""
+# insecure
+# raw
+# fail
+# silent
+# show-error
+# compressed
+# create-dirs
+# connect-timeout = {connect_time_out}
+# max-time = {max_time}
+# retry = {retries}
+# retry-delay = {retry_delay}
+# {cookie_text}
+# write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
+#
+#
+# """
+#                 wfd.write(file_header_text)
 
             last_file = None
             if self.urls_to_download_last:
@@ -135,13 +161,17 @@ write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
                 """ smaller files should be downloaded first so the progress bar gets moving early. """
                 return l[2] - r[2]  # non Info.xml files are sorted by size
 
+            def get_path(filename):
+                return ('/' if '/' in str(filename) else '\\').join(re.split(r'[/\\]', str(filename))[:-1])
+
             wfd_cycler = itertools.cycle(wfd_list)
             url_num = 0
             sorted_by_size = sorted(self.urls_to_download, key=functools.cmp_to_key(url_sorter))
             for url, path, size in sorted_by_size:
                 fixed_path = self.fix_path(path)
+                out_dir = get_path(fixed_path)
                 wfd = next(wfd_cycler)
-                wfd.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
+                wfd.write(f'''{url}\n  dir={out_dir}\n\n''')
                 url_num += 1
 
             for wfd in wfd_list:
@@ -149,7 +179,8 @@ write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
 
             for url, path, size in self.urls_to_download_last:
                 fixed_path = self.fix_path(path)
-                last_file.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
+                out_dir = get_path(fixed_path)
+                last_file.write(f'''{url}\n  out={out_dir}\n\n''')
                 url_num += 1
 
             # insert None which means "wait" before the config file that downloads urls_to_download_last.
@@ -157,5 +188,7 @@ write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
             # it might happen that there are only urls_to_download_last - so no need to "wait".
             if last_file and len(wfd_list) > 0:
                 file_name_list.insert(-1, None)
+
+        file_name_list.insert(0, create_options_file(curl_config_file_path))
 
         return file_name_list
