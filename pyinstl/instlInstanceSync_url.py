@@ -109,6 +109,7 @@ class InstlInstanceSync_url(InstlInstanceSync):
 
     def create_parallel_run_config_file(self, parallel_run_config_file_path, config_files):
         with utils.utf8_open_for_write(parallel_run_config_file_path, "w") as wfd:
+            options_file_path = None
             for config_file in config_files:
                 if config_file is None:  # None means to insert a wait
                     wfd.write("wait\n")
@@ -118,7 +119,10 @@ class InstlInstanceSync_url(InstlInstanceSync):
                         normalized_path = win32api.GetShortPathName(config_file)
                     else:
                         normalized_path = config_file
-                    wfd.write(config_vars.resolve_str(f'''"$(DOWNLOAD_TOOL_PATH)" --config "{normalized_path}"\n'''))
+                    if options_file_path is None:  # The first file is the list is the options configuration file
+                        options_file_path = normalized_path
+                    else:
+                        wfd.write(config_vars.resolve_str(f'''"aria2c" -i "{normalized_path}" --conf-path="{options_file_path}"\n'''))
 
     def create_check_checksum_instructions(self, num_files):
         check_checksum_instructions_accum = AnonymousAccum()
