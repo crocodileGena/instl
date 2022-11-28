@@ -122,7 +122,7 @@ class InstlInstanceSync_url(InstlInstanceSync):
                     if options_file_path is None:  # The first file is the list is the options configuration file
                         options_file_path = normalized_path
                     else:
-                        wfd.write(config_vars.resolve_str(f'''"../../../aria2c" -i "{normalized_path}" --conf-path="{options_file_path}"\n'''))
+                        wfd.write(config_vars.resolve_str(f'''"$(DOWNLOAD_TOOL_PATH)" -i "{normalized_path}" --conf-path="{options_file_path}"\n'''))
 
     def create_check_checksum_instructions(self, num_files):
         check_checksum_instructions_accum = AnonymousAccum()
