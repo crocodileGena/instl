@@ -180,7 +180,7 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
             for url, path, size in self.urls_to_download_last:
                 fixed_path = self.fix_path(path)
                 out_dir = get_path(fixed_path)
-                last_file.write(f'''{url}\n  out={out_dir}\n\n''')
+                last_file.write(f'''{url}\n  dir={out_dir}\n\n''')
                 url_num += 1
 
             # insert None which means "wait" before the config file that downloads urls_to_download_last.
