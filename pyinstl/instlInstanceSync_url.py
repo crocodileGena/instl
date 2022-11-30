@@ -94,9 +94,14 @@ class InstlInstanceSync_url(InstlInstanceSync):
 
             num_files_to_download = int(config_vars["__NUM_FILES_TO_DOWNLOAD__"])
 
-            parallel_run_config_file_path = curl_config_folder.joinpath(config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).sh"))
+            current_os = config_vars["__CURRENT_OS__"].str()
+            if current_os == 'Mac':
+                parallel_run_config_file_path = curl_config_folder.joinpath(config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).sh"))
+            elif current_os == 'Win':
+                parallel_run_config_file_path = curl_config_folder.joinpath(config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).bat"))
             self.create_parallel_run_config_file(parallel_run_config_file_path, config_file_list)
-            dl_commands += ShellCommand('chmod +x "%s"' % parallel_run_config_file_path, report_own_progress=False)
+            if current_os == 'Mac':
+                dl_commands += ShellCommand('chmod +x "%s"' % parallel_run_config_file_path, report_own_progress=False)
             dl_commands += ShellCommand('"%s"' % parallel_run_config_file_path, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
 
             if num_files_to_download > 1:
