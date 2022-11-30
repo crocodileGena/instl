@@ -187,8 +187,8 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
             # insert None which means "wait" before the config file that downloads urls_to_download_last.
             # but only if there were actually download files other than urls_to_download_last.
             # it might happen that there are only urls_to_download_last - so no need to "wait".
-            if last_file and len(wfd_list) > 0:
-                file_name_list.insert(-1, None)
+            # if last_file and len(wfd_list) > 0:
+            #     file_name_list.insert(-1, None)
 
         file_name_list.insert(0, create_options_file(curl_config_file_path))
 
