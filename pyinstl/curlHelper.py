@@ -29,7 +29,10 @@ def create_options_file(config_file_path):
     file_header_text = f"""
     header=Cookie: {sync_urls_cookie}
     download-result=hide
-    console-log-level=error
+    summary-interval=2
+    auto-file-renaming=false
+    allow-overwrite=true
+    http-accept-gzip=true
     max-concurrent-downloads=16
     connect-timeout={connect_time_out}
     timeout={max_time}

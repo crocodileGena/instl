@@ -102,7 +102,7 @@ class InstlInstanceSync_url(InstlInstanceSync):
             self.create_parallel_run_config_file(parallel_run_config_file_path, config_file_list)
             if current_os == 'Mac':
                 dl_commands += ShellCommand('chmod +x "%s"' % parallel_run_config_file_path, report_own_progress=False)
-            dl_commands += ShellCommand('"%s"' % parallel_run_config_file_path, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
+            dl_commands += ShellCommand('"%s"' % parallel_run_config_file_path, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=True)
 
             if num_files_to_download > 1:
                 dl_end_message = f"Downloading {num_files_to_download} files done"
