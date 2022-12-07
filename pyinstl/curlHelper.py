@@ -28,12 +28,15 @@ def create_options_file(config_file_path):
     file = utils.utf8_open_for_write(file_name, "w")
     file_header_text = f"""
     header=Cookie: {sync_urls_cookie}
-    download-result=hide
+    log-level=notice
     summary-interval=2
     auto-file-renaming=false
     allow-overwrite=true
     http-accept-gzip=true
-    max-concurrent-downloads=16
+    enable-mmap=true
+    file-allocation=falloc
+    max-concurrent-downloads=1024
+    max-connection-per-server=5
     connect-timeout={connect_time_out}
     timeout={max_time}
     max-tries={retries}
