@@ -34,7 +34,6 @@ def create_options_file(config_file_path):
     allow-overwrite=true
     http-accept-gzip=true
     enable-mmap=true
-    file-allocation=falloc
     max-concurrent-downloads=1024
     max-connection-per-server=5
     connect-timeout={connect_time_out}
