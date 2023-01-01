@@ -162,6 +162,8 @@ no_flags_patterns: if a file matching one of these patterns exists in the destin
                 break
         return retVal
 
+
+
     def should_hard_link_file(self, file_path: Path):
         assert isinstance(file_path, Path)
         retVal = False
