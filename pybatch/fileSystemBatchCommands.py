@@ -1009,6 +1009,14 @@ class Glober(PythonBatchCommandBase):
             excluded_items.extend(glob.glob(excluded_item))
         paths = set(glob.glob(self.glob_pattern)) - set(excluded_items)
 
+        log.debug(f"excluding '{self.excludes}' from glob_pattern '{self.glob_pattern}'")
+
+        for a_path in glob.glob(self.glob_pattern):
+            log.debug(f"glob_pattern path: '{a_path}'")
+
+        for a_path in excluded_items:
+            log.debug(f"excludes path: '{a_path}'")
+
         for a_path in paths:
             if self.target_param_name:
                 self.kwargs_for_glob_handler[self.target_param_name] = a_path
