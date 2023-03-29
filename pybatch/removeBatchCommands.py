@@ -141,9 +141,11 @@ class RmFileOrDir(PythonBatchCommandBase):
             resolved_path = utils.ExpandAndResolvePath(self.path)
             if resolved_path.is_symlink() or resolved_path.is_file():
                 self.doing = f"""removing file'{resolved_path}'"""
+                log.info(self.doing)
                 resolved_path.unlink()
             elif resolved_path.is_dir():
                 self.doing = f"""removing folder'{resolved_path}'"""
+                log.info(self.doing)
                 shutil.rmtree(resolved_path, onerror=self.who_locks_file_error_dict)
         except Exception as ex:
             if retry and resolved_path is not None:
