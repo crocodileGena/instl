@@ -22,7 +22,7 @@ from . import connectionBase
 from db import DBManager
 from pybatch import *
 
-from .curlHelper import CUrlHelper
+from .pyDownloadHelper import PyDownloadHelper
 
 log = logging.getLogger()
 
@@ -109,7 +109,7 @@ class InstlInstanceBase(IndexYamlReaderBase, metaclass=abc.ABCMeta):
         self.path_searcher.add_search_path(config_vars["__INSTL_DATA_FOLDER__"].Path())
 
         self.batch_accum = PythonBatchCommandAccum()
-        self.dl_tool = CUrlHelper()
+        self.dl_tool = PyDownloadHelper()
 
         self.out_file_realpath = None
         self.internal_progress = 0  # progress of preparing installer NOT of the installation

@@ -7,11 +7,14 @@ import stat
 import subprocess
 import sys
 import time
+from functools import partial
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from threading import Thread
 from typing import List
 
 import psutil
+import requests
 
 import utils
 from .baseClasses import PythonBatchCommandBase
@@ -307,6 +310,43 @@ class ParallelRun(PythonBatchCommandBase, kwargs_defaults={'action_name': None, 
                     raise
         finally:
             self.increment_progress()
+
+
+class ParallelDownload(PythonBatchCommandBase):
+    def __init__(self, url_list, **kwargs):
+        super().__init__(**kwargs)
+        self.url_list = url_list
+
+    def repr_own_args(self, all_args: List[str]) -> None:
+        all_args.append(self.unnamed__init__param(self.url_list))
+
+    def get_action_name(self):
+        return self.action_name if self.action_name else self.__class__.__name__
+
+    def progress_msg_self(self):
+        return f"""{self.get_action_name()} '{len(self.url_list)}' URLs"""
+
+    def increment_and_output_progress(self, increment_by=None, prog_counter_msg=None, prog_msg=None):
+        pass
+
+    @staticmethod
+    def download_file(file, batch_cmd):
+        url = file[0]
+        path = file[1]
+        size = file[2]
+        batch_cmd.doing = f"""{batch_cmd.get_action_name()}, downloading url '{url}' into '{path}', size {size}"""
+        r = requests.get(url)
+        is_text = "text" in r.headers.get('content-type')
+        open(path, 'w{0}'.format('b' if not is_text else '')).write(r.content)
+
+    def __call__(self, *args, **kwargs):
+        PythonBatchCommandBase.__call__(self, *args, **kwargs)
+        pool = Pool(cpu_count())
+        download_func = partial(ParallelDownload.download_file, self)
+        results = pool.map(download_func, self.url_list)
+        pool.close()
+        pool.join()
+        self.increment_progress()
 
 
 class ExecPython(PythonBatchCommandBase):

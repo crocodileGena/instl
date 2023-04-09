@@ -4,6 +4,9 @@ from collections import defaultdict
 import urllib
 import sys
 from pathlib import PurePath
+
+from pybatch.subprocessBatchCommands import ParallelDownload
+
 if sys.platform == 'win32':
     import win32api
 
@@ -94,9 +97,10 @@ class InstlInstanceSync_url(InstlInstanceSync):
 
             num_files_to_download = int(config_vars["__NUM_FILES_TO_DOWNLOAD__"])
 
-            parallel_run_config_file_path = curl_config_folder.joinpath(config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).parallel-run"))
-            self.create_parallel_run_config_file(parallel_run_config_file_path, config_file_list)
-            dl_commands += ParallelRun(parallel_run_config_file_path, shell=False, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
+            # parallel_run_config_file_path = curl_config_folder.joinpath(config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).parallel-run"))
+            # self.create_parallel_run_config_file(parallel_run_config_file_path, config_file_list)
+            # dl_commands += ParallelRun(parallel_run_config_file_path, shell=False, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
+            dl_commands += ParallelDownload(self.instlObj.dl_tool.get_urls_to_download(), shell=False, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
 
             if num_files_to_download > 1:
                 dl_end_message = f"Downloading {num_files_to_download} files done"
