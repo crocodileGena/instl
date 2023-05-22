@@ -33,6 +33,9 @@ class InstlDoIt(InstlInstanceBase):
         do_command_func()
 
         self.write_batch_file(self.batch_accum)
+
+        self.write_config_vars_to_file(config_vars.get("__WRITE_CONFIG_VARS_TO_FILE__", None).Path())
+
         if bool(config_vars["__RUN_BATCH__"]):
             self.run_batch_file()
 
@@ -66,12 +69,14 @@ class InstlDoIt(InstlInstanceBase):
         except:
             name = IID
 
-        with self.batch_accum.sub_accum(Stage(name+"...")) as iid_accum:
+        with self.batch_accum.sub_accum(Stage(f"{name}...")) as iid_accum:
             if len(action_list) > 0:
                 iid_accum += Remark(f"--- Begin {IID} {name}")
             num_actions = len(action_list)
             for i in range(num_actions):
-                iid_accum += EvalShellCommand(action_list[i], name, self.python_batch_names)
+                sub_actions = config_vars.resolve_str_to_list(action_list[i])
+                for sub_action in sub_actions:
+                    iid_accum += EvalShellCommand(sub_action, name, self.python_batch_names)
             if len(action_list) > 0:
                 iid_accum += Remark(f"--- End {IID} {name}")
 

@@ -27,7 +27,6 @@ from pybatch import *
 from .instlException import InstlException
 from configVar import ConfigVarYamlReader
 
-
 def start_redis_heartbeat_thread(redis_host, redis_port, heartbeat_key, heartbeat_interval):
     """ start a daemon thread that will periodically set a redis key to a string containing the current date/time
         a daemon thread will stop when the application quits, so no need to join the thread
@@ -158,6 +157,7 @@ class InstlAdmin(InstlInstanceBase):
         self.fields_relevant_to_info_map = ('path', 'flags', 'revision', 'checksum', 'size')
         self.config_vars_stack_size_before_reading_config_files = None
         self.wait_info_counter = 0  # incremented when printing wait info
+        self.compile_exclude_regexi()
 
     def get_default_out_file(self) -> None:
         if "__CONFIG_FILE__" in config_vars and '__MAIN_OUT_FILE__' not in config_vars:
@@ -288,20 +288,24 @@ class InstlAdmin(InstlInstanceBase):
         forbidden_file_regex_list = list(config_vars["FILE_EXCLUDE_REGEX"])
         self.compiled_forbidden_file_regex = utils.compile_regex_list_ORed(forbidden_file_regex_list)
 
+    def is_forbidden_file(self, item_to_check):
+        return bool(self.compiled_forbidden_file_regex.search(os.fspath(item_to_check)))
+
     def raise_if_forbidden_file(self, item_to_check):
-        if self.compiled_forbidden_file_regex.search(os.fspath(item_to_check)):
-            raise InstlException(f"{item_to_check} has forbidden characters should not be committed to svn")
+        if self.is_forbidden_file(item_to_check):
+            raise InstlException(f"{item_to_check} is on forbidden file list and should not be committed to svn")
+
+    def is_forbidden_dir(self, item_to_check):
+        return bool(self.compiled_forbidden_folder_regex.search(os.fspath(item_to_check)))
 
     def raise_if_forbidden_dir(self, item_to_check):
-        if self.compiled_forbidden_folder_regex.search(os.fspath(item_to_check)):
-            raise InstlException(f"{item_to_check} has forbidden characters should not be committed to svn")
+        if self.is_forbidden_dir(item_to_check):
+            raise InstlException(f"{item_to_check} is on forbidden folders list and  should not be committed to svn")
 
     def do_stage2svn(self):
         self.batch_accum.set_current_section('admin')
         stage_folder = config_vars["STAGING_FOLDER"].Path()
         svn_folder = config_vars["SVN_CHECKOUT_FOLDER"].Path()
-
-        self.compile_exclude_regexi()
 
         stage_folder_svn_folder_pairs = []
         if config_vars.defined("__LIMIT_COMMAND_TO__"):
@@ -345,7 +349,9 @@ class InstlAdmin(InstlInstanceBase):
             if stage_only_item_path.is_symlink():
                 raise InstlException(stage_only_item_path+" is a symlink which should not be committed to svn, run instl fix-symlinks and try again")
             elif stage_only_item_path.is_file():
-                self.raise_if_forbidden_file(stage_only_item_path)
+                if self.is_forbidden_file(stage_only_item_path):
+                    self.progress(f"skipping forbidden file {stage_only_item_path}")
+                    continue
 
                 # if stage file is .wtar.aa file but there is an identical .wtar on the right - do not add.
                 # this is done to help transitioning to single wtar files to be .wtar.aa without forcing the users
@@ -368,7 +374,9 @@ class InstlAdmin(InstlInstanceBase):
                     self.batch_accum += Progress(f"not adding {stage_only_item_path} because {svn_item_path_without_aa} exists and is identical")
 
             elif stage_only_item_path.is_dir():
-                self.raise_if_forbidden_dir(stage_only_item_path)
+                if self.is_forbidden_dir(stage_only_item_path):
+                    self.progress(f"skipping forbidden folder {stage_only_item_path}")
+                    continue
                 # check that all items under a new folder pass the forbidden file/folder rule
                 for root, dirs, files in os.walk(stage_only_item_path, followlinks=False):
                     for item in sorted(files):
@@ -383,9 +391,11 @@ class InstlAdmin(InstlInstanceBase):
 
         # copy changed items:
 
-        do_not_copy_items = list()  # items that should not be copied even if different, there are items that are part of .wtar where
-                                    # each part might be different but the contents are not. E.g. when re-wtaring files where only
-                                    # modification date has changed.
+        do_not_copy_items = list()
+        # items that should not be copied even if different.
+        # There are items that are part of .wtar where
+        # each part might be different but the contents are not.
+        # E.g. when re-wtaring files where only modification date has changed.
         for diff_item in sorted(comparator.diff_files):
             copy_file = diff_item not in do_not_copy_items
             left_item_path = Path(comparator.left, diff_item)
@@ -423,6 +433,13 @@ class InstlAdmin(InstlInstanceBase):
     def prepare_conditions_for_wtar(self):
         folder_wtar_regex_list = list(config_vars["FOLDER_WTAR_REGEX"])
         self.compiled_folder_wtar_regex = utils.compile_regex_list_ORed(folder_wtar_regex_list)
+
+        # some folders should not be wtarred even if they pass 'FOLDER_WTAR_REGEX'.
+        # if FOLDER_EXCLUDE_WTAR_REGEX was not found, folder_exclude_wtar_regex_list will default to a^
+        # which will not exclude any folder
+        folder_exclude_wtar_regex_list = config_vars.get("FOLDER_EXCLUDE_WTAR_REGEX", ['a^']).list()
+        self.compiled_folder_exclude_wtar_regex = utils.compile_regex_list_ORed(folder_exclude_wtar_regex_list)
+
         file_wtar_regex_list = list(config_vars["FILE_WTAR_REGEX"])
         self.compiled_file_wtar_regex = utils.compile_regex_list_ORed(file_wtar_regex_list)
 
@@ -439,27 +456,30 @@ class InstlAdmin(InstlInstanceBase):
     def should_wtar(self, dir_item: Path):
         _should_wtar = False
         _already_tarred = False
+        dir_item_str = os.fspath(dir_item)
         try:
-            if self.already_wtarred_regex.search(os.fspath(dir_item)):
+            if self.already_wtarred_regex.search(dir_item_str):
                 _should_wtar = False
                 _already_tarred = True
             elif dir_item.is_dir():
-                if self.compiled_folder_wtar_regex.search(os.fspath(dir_item)):
-                    # it's a folder matching one of the filters for wtarring a folder
+                if self.compiled_folder_wtar_regex.search(dir_item_str) \
+                    and not self.compiled_folder_exclude_wtar_regex.search(dir_item_str):
+                    # it's a folder matching one of the filters for wtarring a folder,
+                    # but is not on the excludes filter
                     _should_wtar = True
                     _already_tarred = False
             elif dir_item.is_file():
-                if self.compiled_file_wtar_regex.search(os.fspath(dir_item)):
+                if self.compiled_file_wtar_regex.search(dir_item_str):
                     # it's a file matching one of the filters for wtarring a file
                     _should_wtar = True
                     _already_tarred = False
                 elif dir_item.stat().st_size > self.min_file_size_to_wtar:
-                    # it's a file who's size is big enough to require wtarring
-                    if re.match(self.compiled_wtar_by_file_size_exclude_regex, os.fspath(dir_item)):
+                    # it's a file whose size is big enough to require wtarring
+                    if re.match(self.compiled_wtar_by_file_size_exclude_regex, dir_item_str):
                         _should_wtar = False
                         _already_tarred = False
                     else:
-                         # but not a file who's name matching one of the filters for NOT wtarring
+                        # but not a file whose name matching one of the filters for NOT wtarring
                         _should_wtar = True
                         _already_tarred = False
                 else:
@@ -604,7 +624,7 @@ class InstlAdmin(InstlInstanceBase):
             raise AssertionError(f"Found {len(problem_messages_by_iid)} missing inherit/depends")
         else:
             self.items_table.resolve_inheritance()
-            self.verify_actions()
+            self.verify_actions(problem_messages_by_iid)
             self.verify_index_to_repo(problem_messages_by_iid)
 
     def verify_inheritance(self, problem_messages_by_iid):
@@ -659,9 +679,8 @@ class InstlAdmin(InstlInstanceBase):
 
             # check sources
             source_and_tag_list = self.items_table.get_details_and_tag_for_active_iids("install_sources", unique_values=True, limit_to_iids=(iid,))
-
             for source in source_and_tag_list:
-                source_path, source_type = source[0], source[1]
+                iid, source_path, source_type = source[0], source[1], source[2]
                 num_files_for_source = self.info_map_table.mark_required_for_source(source_path, source_type)
                 if num_files_for_source == 0:
                     case_insensitive_items = self.info_map_table.get_any_item_recursive(source_path, case_sensitive=False)
@@ -670,6 +689,17 @@ class InstlAdmin(InstlInstanceBase):
                         if case_insensitive_items:
                             err_message += f"""\nthere are some files/folders with similar name but different case:\n{[s.path for s in case_insensitive_items]}"""
                         problem_messages_by_iid[iid].append(err_message)
+
+            # check previous sources
+            previous_sources = self.items_table.get_details_and_tag_for_active_iids("previous_sources", unique_values=True)
+            for previous_source in previous_sources:
+                iid, previous_source_path, source_type = previous_source[0], previous_source[1], previous_source[2]
+                if not previous_source_path:
+                    err_message = f"previous source for {iid} is empty"
+                    problem_messages_by_iid[iid].append(err_message)
+                if source_type not in ("!dir", "!file"):
+                    err_message = f"previous source for {iid} has type {source_type}, should be !file or !dir"
+                    problem_messages_by_iid[iid].append(err_message)
 
             # check targets
             if len(source_and_tag_list) > 0:
@@ -744,15 +774,22 @@ class InstlAdmin(InstlInstanceBase):
             for root, dirs, files in os.walk(folder_to_check, followlinks=False):
                 for a_file in files:
                     item_path = os.path.join(root, a_file)
-                    file_is_exec = self.is_file_exec(item_path)
-                    file_should_be_exec = self.should_file_be_exec(item_path)
-                    if file_is_exec != file_should_be_exec:
-                        if file_should_be_exec:
-                            self.batch_accum += Chmod(item_path, "a+x")
-                            files_that_must_be_exec.append(item_path)
-                        else:
-                            self.batch_accum += Chmod(item_path, "a-x")
-                            files_that_should_not_be_exec.append(item_path)
+                    if self.compiled_forbidden_file_regex.search(os.fspath(item_path)):
+                        # removing forbidden files should be done by addin RmFile to self.batch_accum, thus:
+                        # self.batch_accum += RmFile(item_path)
+                        # however MacOS Icon files have \r characters which ii failed to print properly
+                        # to the batch file. Therefor they are deleted immediately here:
+                        os.unlink(item_path)
+                    else:
+                        file_is_exec = self.is_file_exec(item_path)
+                        file_should_be_exec = self.should_file_be_exec(item_path)
+                        if file_is_exec != file_should_be_exec:
+                            if file_should_be_exec:
+                                self.batch_accum += Chmod(item_path, "a+x")
+                                files_that_must_be_exec.append(item_path)
+                            else:
+                                self.batch_accum += Chmod(item_path, "a-x")
+                                files_that_should_not_be_exec.append(item_path)
 
             self.batch_accum += Chmod(folder_to_check, mode="a+rw,+X", recursive=True)  # "-R a+rw,+X"
 
@@ -771,7 +808,6 @@ class InstlAdmin(InstlInstanceBase):
             self.run_batch_file()
 
     def do_file_sizes(self):
-        self.compile_exclude_regexi()
         out_file_path = config_vars.get("__MAIN_OUT_FILE__", None).Path()
         with utils.write_to_file_or_stdout(out_file_path) as out_file:
             what_to_scan = config_vars["__MAIN_INPUT_FILE__"].Path()
@@ -998,7 +1034,6 @@ class InstlAdmin(InstlInstanceBase):
                 sub_accum += FileSizes(folder_to_scan=checkout_base_folder, out_file=info_map_file_sizes_path, skip_action=skip_some_actions)
 
             batch_accum += IndexYamlReader(checkout_folder_index_path)
-            batch_accum += ShortIndexYamlCreator(checkout_folder_short_index_path)
             batch_accum += SVNInfoReader(info_map_info_path, format='info', disable_indexes_during_read=True)
             batch_accum += SVNInfoReader(info_map_props_path, format='props')
             batch_accum += SVNInfoReader(info_map_file_sizes_path, format='file-sizes')
@@ -1014,6 +1049,7 @@ class InstlAdmin(InstlInstanceBase):
             batch_accum += InfoMapFullWriter(full_info_map_file_path, in_format='text')
             batch_accum += InfoMapSplitWriter(revision_instl_folder_path, in_format='text')
             batch_accum += Wzip(revision_instl_index_path)
+            batch_accum += ShortIndexYamlCreator(checkout_folder_short_index_path)
             batch_accum += CreateRepoRevFile()
 
             with batch_accum.sub_accum(Cd(revision_folder_path)) as sub_accum:
@@ -1310,7 +1346,7 @@ class InstlAdmin(InstlInstanceBase):
 
             def manifest_node_reader(self, the_node, *args, **kwargs):
                 for a_node_name, a_node_value in the_node.items():
-                    yaml_node_as_dict = aYaml.nodeToPy(a_node_value, order=yaml_keys_order, single_value=yaml_single_value_keys)
+                    yaml_node_as_dict = aYaml.nodeToPy(a_node_value, order=yaml_keys_order, single_value=yaml_single_value_keys, preserve_tags=True)
                     top_level_tag = kwargs.get("top_level_tag", None)
                     item = ManifestItem(a_node_name, yaml_node_as_dict, self.file_read_stack[-1], top_level_tag)
                     self.manifest_nodes[a_node_name].append(item)
@@ -1318,11 +1354,12 @@ class InstlAdmin(InstlInstanceBase):
         stage_folder = config_vars["STAGING_FOLDER"].Path()
         reader = ManifestYamlReader(config_vars)
         num_files = 0
-        for top_level_dir in stage_folder.glob("*"):
+        for top_level_dir in sorted(stage_folder.glob("*")):
             if top_level_dir.is_dir() and not top_level_dir.name.startswith('.'):
                 top_level_tag = top_level_dir.name
                 for root, dirs, files in os.walk(top_level_dir, followlinks=False):
-                    for a_file in files:
+                    dirs.sort()  # to be idempotent, so folders will always be scanned in the same order
+                    for a_file in sorted(files):
                         a_file_path = Path(root, a_file)
                         if a_file_path.name.endswith("manifest.yaml"):
                             print(a_file_path)

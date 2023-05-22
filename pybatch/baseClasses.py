@@ -1,12 +1,19 @@
-import os
 import sys
 import abc
 import inspect
-from typing import Dict, List
+from typing import Dict
 import time
 from contextlib import contextmanager
 from typing import List
 import logging
+import abc
+import inspect
+import logging
+import sys
+import time
+from contextlib import contextmanager
+from typing import Dict, List
+
 log = logging.getLogger(__name__)
 
 import utils
@@ -206,8 +213,8 @@ class PythonBatchCommandBase(abc.ABC):
         if self.skip_action:
             raise PythonBatchCommandBase.SkipActionException()
 
-    def unnamed__init__param(self, value):
-        value_str = utils.quoteme_raw_by_type(value, PythonBatchCommandBase.config_vars_for_repr)
+    def unnamed__init__param(self, value, resolve_path=False):
+        value_str = utils.quoteme_raw_by_type(value, PythonBatchCommandBase.config_vars_for_repr, resolve_path=resolve_path)
         return value_str
 
     def named__init__param(self, name, value):
@@ -298,6 +305,10 @@ class PythonBatchCommandBase(abc.ABC):
         """
         return f"{self.__class__.__name__}"
 
+    def exception_ignored_message(self) -> str:
+        """ can be overridden to provide specific message in case an exception was deliberately ignored"""
+        return self.warning_msg_self()
+
     def error_dict(self, exc_type, exc_val, exc_tb) -> Dict:
         self.error_dict_self(exc_type, exc_val, exc_tb)
         if not self.doing:
@@ -341,7 +352,7 @@ class PythonBatchCommandBase(abc.ABC):
         """
             WINDOWS ONLY - will do nothing on other platforms
             updates _error_dict with describing who is locking a file - if any
-            function signiture is structured to be suitable to pass to shutil.rmtree onerror param
+            function signature is structured to be suitable to pass to shutil.rmtree onerror param
         """
         who_locks_file_dll_path = config_vars.get("__WHO_LOCKS_FILE_DLL_PATH__", None).Path()
         if who_locks_file_dll_path:
@@ -350,12 +361,6 @@ class PythonBatchCommandBase(abc.ABC):
                 self._error_dict["locked_file_info"] = locked_file_info
         if exc_info is not None:
             raise
-
-    def enter_self(self) -> None:
-        """ classes overriding PythonBatchCommandBase can add code here without
-            repeating __enter__, but not do any actual work!
-        """
-        pass
 
     def __enter__(self):
         PythonBatchCommandBase.stage_stack.append(self)
@@ -370,25 +375,18 @@ class PythonBatchCommandBase(abc.ABC):
                 raise
         return self
 
-    def exit_self(self, exit_return) -> None:
+    def enter_self(self) -> None:
         """ classes overriding PythonBatchCommandBase can add code here without
-            repeating __exit__.
-            exit_self will be called regardless of exceptions
-            param exit_return is what __exit__ will return
+            repeating __enter__, but not do any actual work!
         """
         pass
-
-    def should_ignore__exit__exception(self, exc_type, exc_val, exc_tb):
-        """ child classes can override for finer control on what to ignore"""
-        retVal = exc_type in self.exceptions_to_ignore
-        return retVal
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         suppress_exception = False
         if exc_type is None or self.ignore_all_errors:
             suppress_exception = True
         elif self.should_ignore__exit__exception(exc_type, exc_val, exc_tb):
-            self.log_result(logging.WARNING, self.warning_msg_self(), exc_val)
+            self.log_result(logging.INFO, self.exception_ignored_message(), exception_obj=None)
             suppress_exception = True
         else:
             if not hasattr(exc_val, "raising_obj"):
@@ -403,14 +401,31 @@ class PythonBatchCommandBase(abc.ABC):
 
         if self.report_own_progress and not PythonBatchCommandBase.ignore_progress:
             if 0 < self.prog_num != self.runtime_progress_num:
-                log.warning(f"{self.__class__.__name__} self.runtime_progress_num ({self.runtime_progress_num}) != expected_progress_num ({self.prog_num})")
+                log.warning(
+                    f"{self.__class__.__name__} self.runtime_progress_num ({self.runtime_progress_num}) != expected_progress_num ({self.prog_num})")
 
         if suppress_exception:
             PythonBatchCommandBase.stage_stack.pop()
         return suppress_exception
 
-    def log_result(self, log_lvl, message, exc_val):
-        log.log(log_lvl, f"{self.progress_msg()} {message}; {exc_val.__class__.__name__}: {exc_val}")
+    def exit_self(self, exit_return) -> None:
+        """ classes overriding PythonBatchCommandBase can add code here without
+            repeating __exit__.
+            exit_self will be called regardless of exceptions
+            param exit_return is what __exit__ will return
+        """
+        pass
+
+    def should_ignore__exit__exception(self, exc_type, exc_val, exc_tb):
+        """ child classes can override for finer control on what to ignore"""
+        retVal = exc_type in self.exceptions_to_ignore
+        return retVal
+
+    def log_result(self, log_lvl, message, exception_obj):
+        full_message = f"{self.progress_msg()} {message}"
+        if exception_obj:
+            full_message += "; {exception_obj.__class__.__name__}: {exception_obj}"
+        log.log(log_lvl, full_message)
 
     def enter_timing_measure(self):
         self.enter_time = time.perf_counter()
@@ -420,7 +435,8 @@ class PythonBatchCommandBase(abc.ABC):
             increment_by = self.own_progress_count
         PythonBatchCommandBase.running_progress = self.runtime_progress_num = PythonBatchCommandBase.running_progress + increment_by
         if PythonBatchCommandBase.running_progress > PythonBatchCommandBase.total_progress:
-            log.warning(f"running_progress ({PythonBatchCommandBase.running_progress}) > total_progress ({PythonBatchCommandBase.total_progress})")
+            log.warning(
+                f"running_progress ({PythonBatchCommandBase.running_progress}) > total_progress ({PythonBatchCommandBase.total_progress})")
 
     def increment_and_output_progress(self, increment_by=None, prog_counter_msg=None, prog_msg=None):
         """ increment runtime_progress_num and report progress and assert progress value against expected total progress.

@@ -72,27 +72,43 @@ class MacDock(PythonBatchCommandBase):
 
 
 class CreateSymlink(PythonBatchCommandBase):
-    """ create a symbolic link (MacOS only)"""
+    """ create a symbolic link (MacOS only)
+    """
 
-    def __init__(self, path_to_symlink: os.PathLike, path_to_target: os.PathLike, **kwargs) -> None:
+    def __init__(self, path_to_symlink: os.PathLike, path_to_target: os.PathLike, relative=True, **kwargs) -> None:
+        """
+            :param path_to_symlink: path to the new symlink, if a file or symlink already exists it will be deleted first
+            :param path_to_target: path to the target, can be relative. target need not exists when symlink is created, so creating the symlink and creating the target can be done in any order.
+        """
         super().__init__(**kwargs)
         self.path_to_symlink = path_to_symlink
         self.path_to_target = path_to_target
+        self.relative = relative
 
     def repr_own_args(self, all_args: List[str]) -> None:
         all_args.append(self.unnamed__init__param(self.path_to_symlink))
         all_args.append(self.unnamed__init__param(self.path_to_target))
+        all_args.append(self.optional_named__init__param("relative", self.relative, True))
 
     def progress_msg_self(self) -> str:
         return f"""Create symlink '{self.path_to_symlink}' to '{self.path_to_target}'"""
 
     def __call__(self, *args, **kwargs) -> None:
         PythonBatchCommandBase.__call__(self, *args, **kwargs)
+        path_to_symlink = utils.ExpandAndResolvePath(self.path_to_symlink, resolve_path=False)
+        with RmSymlink(path_to_symlink, report_own_progress=False, resolve_path=False) as rf:
+            rf()  # remove path_to_symlink so path_to_symlink.resolve() will not follow the symlink,
+                  # yes will still resolve ../ in the path
+        path_to_symlink = path_to_symlink.resolve()
+
         path_to_target = utils.ExpandAndResolvePath(self.path_to_target)
-        path_to_symlink = Path(os.path.expandvars(self.path_to_symlink))
+        if self.relative:
+            try:
+                path_to_target = path_to_target.relative_to(path_to_symlink.parent)
+            except:
+                pass  # if paths cannot be relative, default to creating absolute symlink
         self.doing = f"""create symlink '{path_to_symlink}' to target '{path_to_target}'"""
-        with RmFile(path_to_symlink, report_own_progress=False, resolve_path=False) as rf:
-            rf()
+
         path_to_symlink.symlink_to(path_to_target)
 
 
@@ -120,12 +136,9 @@ class RmSymlink(PythonBatchCommandBase):
         unresolved_path = Path(expanded_path)
         self.doing = f"""removing symlink '{unresolved_path}'"""
         if unresolved_path.is_symlink():
-            with RmFile(unresolved_path, report_own_progress=False, resolve_path=False) as rf:
-                rf()
+            unresolved_path.unlink()
         elif unresolved_path.exists():
             log.warning(f"RmSymlink, not a symlink: {unresolved_path}")
-        else:
-            log.warning(f"RmSymlink, not found: {unresolved_path}")
 
 
 class SymlinkToSymlinkFile(PythonBatchCommandBase):
@@ -265,4 +278,3 @@ class ResolveSymlinkFilesInFolder(PythonBatchCommandBase):
                     self.doing = f"""resolve symlink file '{self.last_symlink_file}'"""
                     with SymlinkFileToSymlink(item_path, own_progress_count=0) as symlink_converter:
                         symlink_converter()
-

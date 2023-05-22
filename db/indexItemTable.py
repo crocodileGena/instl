@@ -15,6 +15,7 @@ log = logging.getLogger()
 import utils
 from aYaml import *
 from configVar import config_vars, private_config_vars
+from configVar import eval_conditional
 
 # when adding a new OS name also add the name in init-values.ddl
 os_names = ('common', 'Mac', 'Mac32', 'Mac64', 'Win', 'Win32', 'Win64', 'Linux')
@@ -47,6 +48,7 @@ class IndexItemsTable(object):
         self.add_triggers()
         self.add_views()
         self.defines_for_iids = dict()  # defines which are specific to an iid
+        self.iid_location_in_file = dict()  # for debugging, used in read_index_node_one_by_one to track duplicate IIDs
 
     def __del__(self):
         self.db.unlock_all_tables()
@@ -533,7 +535,11 @@ class IndexItemsTable(object):
                 with kwargs['node-stack'](detail_node):
                     detail_name = detail_node[0].value
                     with kwargs['node-stack'](detail_node[1]):
-                        if detail_name in IndexItemsTable.os_names_to_num:
+                        if detail_name.startswith("__if"):
+                            if eval_conditional(detail_name, config_vars):
+                                conditional_details = self.read_item_details_from_node(the_iid, detail_node[1], the_os, **kwargs)
+                                details.extend(conditional_details)
+                        elif detail_name in IndexItemsTable.os_names_to_num:
                             os_specific_details = self.read_item_details_from_node(the_iid, detail_node[1], the_os=detail_name, **kwargs)
                             details.extend(os_specific_details)
                         elif detail_name == 'actions':
@@ -573,6 +579,12 @@ class IndexItemsTable(object):
                                                     details.append(new_detail)
                                                     count_insertions += 1
                                             assert count_insertions < 3, f"count_insertions: {count_insertions}"
+                                    elif detail_name == "depends":
+                                        # depends might have an item which is a list of items when resolving
+                                        values = config_vars.resolve_str_to_list(value)
+                                        for value in values:
+                                            new_detail = (the_iid, the_iid, self.os_names_to_num[the_os], detail_name, value, tag)
+                                            details.append(new_detail)
                                     else:
                                         new_detail = (the_iid, the_iid, self.os_names_to_num[the_os], detail_name, value, tag)
                                         details.append(new_detail)
@@ -641,10 +653,15 @@ class IndexItemsTable(object):
         current_template = None  # to keep track which template is causing problems
         current_node = a_node  # to keep track which node is causing problems
         current_detail = None
+
         for IID_or_template in a_node:
             current_iid = IID_or_template
             try:
                 current_node = a_node[IID_or_template]
+                if IID_or_template in self.iid_location_in_file:
+                    print(f"duplicate {IID_or_template} found in lines {self.iid_location_in_file[IID_or_template]} and\n {(current_node.start_mark.line, current_node.end_mark.line)}")
+                else:
+                    self.iid_location_in_file[IID_or_template] = (current_node.start_mark.line, current_node.end_mark.line)
                 with kwargs['node-stack'](a_node[IID_or_template]):
                     index_items = list()
                     items_details = list()
@@ -662,6 +679,7 @@ class IndexItemsTable(object):
 
                     with self.db.transaction() as curs:
                         for item in index_items:
+                            current_detail = None  # so previous details will not be reported in case of exception in this loop
                             current_iid = item[0]
                             curs.execute(insert_item_q, item)
                         for detail in items_details:
@@ -687,6 +705,11 @@ class IndexItemsTable(object):
                 if hasattr(ex, "lines"):
                     rich_print(f"    lines {ex.lines[0]} -> {ex.lines[0]}")
                 else:
+                    path_to_file = kwargs.get('path-to-file', kwargs.get('original-path-to-file', None))
+                    if path_to_file:
+                        rich_print(f"    file {path_to_file}")
+                    if current_iid in self.iid_location_in_file:
+                        rich_print(f"    lines {self.iid_location_in_file[current_iid][0]} -> {self.iid_location_in_file[current_iid][1]}")
                     rich_print(f"    lines {current_node.start_mark.line} -> {current_node.end_mark.line}")
                 rich_print(f"    {ex}")
                 rich_ruler("***")
@@ -774,14 +797,21 @@ class IndexItemsTable(object):
 
     def read_require_node(self, a_node: yaml.MappingNode, **kwargs):
 
+        # get list of IIDs that were replaced
+        previous_to_current_iids = dict()
+        previous_from_db = self.get_previous_iids()
+        for current, previous in previous_from_db:
+            previous_to_current_iids[previous] = current
+
         require_items = dict()
         if a_node.isMapping():
             all_iids = self.get_all_iids()
             for IID in a_node:
                 with kwargs['node-stack'](a_node[IID]):
-                    require_details = self.read_item_details_from_require_node(IID, a_node[IID], all_iids)
+                    actuall_iid = previous_to_current_iids.get(IID, IID)
+                    require_details = self.read_item_details_from_require_node(actuall_iid, a_node[IID], all_iids, previous_to_current_iids)
                     if require_details:
-                        require_items[IID] = require_details
+                        require_items[actuall_iid] = require_details
 
             self.clean_require_items(require_items)
 
@@ -806,7 +836,7 @@ class IndexItemsTable(object):
                 curs.executemany(query_text1, all_details)
                 curs.execute(query_text2)
 
-    def read_item_details_from_require_node(self, the_iid, the_node, all_iids):
+    def read_item_details_from_require_node(self, the_iid, the_node, all_iids, previous_to_current_iids):
         the_os_id = self.os_names_to_num['common']
         details = list()
         if the_node.isMapping():
@@ -821,19 +851,21 @@ class IndexItemsTable(object):
                         details.append(new_detail)
                 elif detail_name == "require_by":
                     for require_by in the_node["require_by"]:
-                        if require_by.value in all_iids:
+                        required_by = previous_to_current_iids.get(require_by.value, require_by.value)  # get new iid if any
+                        if required_by in all_iids:
                             detail_name = "require_by"
                         else:
                             detail_name = "deprecated_require_by"
-                        new_detail = {"original_iid": the_iid, "owner_iid": the_iid, "os_id": the_os_id, "detail_name": detail_name, "detail_value": require_by.value}
+                        new_detail = {"original_iid": the_iid, "owner_iid": the_iid, "os_id": the_os_id, "detail_name": detail_name, "detail_value": required_by}
                         details.append(new_detail)
         elif the_node.isSequence():
             for require_by in the_node:
-                if require_by.value in all_iids:
+                required_by = previous_to_current_iids.get(require_by.value, require_by.value)  # get new iid if any
+                if required_by in all_iids:
                     detail_name = "require_by"
                 else:
                     detail_name = "deprecated_require_by"
-                details.append({"original_iid": the_iid, "owner_iid": the_iid, "os_id": the_os_id, "detail_name": detail_name, "detail_value": require_by.value})
+                details.append({"original_iid": the_iid, "owner_iid": the_iid, "os_id": the_os_id, "detail_name": detail_name, "detail_value": required_by})
         return details
 
     def repr_item_for_yaml(self, iid, resolve=False):
@@ -881,7 +913,10 @@ class IndexItemsTable(object):
             AND remote_version != '_'
             """
         results = self.db.select_and_fetchall(query_text, query_params={}, progress_callback=progress_callback)
-        retVal = [mm[:6] for mm in results]
+        field_names = ("IID", "guid", "name", "installed version", "latest version", "uninstall guid", "size mac", "size win")
+        retVal = [field_names]  # first entry is the field names
+        num_fields_to_take = min(len(results[0]), len(field_names))
+        retVal.extend([mm[:num_fields_to_take] for mm in results])
         return retVal
 
         return retVal
@@ -1213,7 +1248,7 @@ class IndexItemsTable(object):
             limit_to_iids_filter += '")'
 
         query_text = f"""
-            SELECT {distinct} index_item_detail_t.detail_value, index_item_detail_t.tag
+            SELECT {distinct} index_item_t.iid, index_item_detail_t.detail_value, index_item_detail_t.tag
             FROM index_item_detail_t
                 JOIN index_item_t
                     ON  index_item_t.iid=index_item_detail_t.owner_iid
@@ -1224,7 +1259,7 @@ class IndexItemsTable(object):
                 {limit_to_iids_filter}
             ORDER BY index_item_detail_t._id
             """
-        # returns: [(iid, index_version, require_version, index_guid, require_guid, generation), ...]
+        # returns: [(iid, detail_value, tag, index_guid), ...]
         retVal = self.db.select_and_fetchall(query_text, query_params={'detail_name': detail_name})
         return retVal
 
@@ -1535,5 +1570,17 @@ class IndexItemsTable(object):
                     WHERE detail_name IN ({action_string}) 
                     ORDER BY _id    
                 """
+        retVal = self.db.select_and_fetchall(query_text)
+        return retVal
+
+    def get_previous_iids(self):
+        """ return original iids with their previous iids
+        """
+
+        query_text = """
+                    SELECT original_iid, detail_value FROM index_item_detail_t
+                    WHERE original_iid==owner_iid
+                    AND detail_name == "previous_iids"
+                    """
         retVal = self.db.select_and_fetchall(query_text)
         return retVal

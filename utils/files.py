@@ -66,6 +66,7 @@ def utf8_open_for_read(*args, **kwargs) -> TextIO:
 
 
 def utf8_open_for_write(*args, **kwargs) -> TextIO:
+    Path(args[0]).parent.mkdir(parents=True, exist_ok=True)
     retVal = open(*args, encoding='utf-8', errors='backslashreplace', **kwargs)
     chown_chmod_on_fd(retVal)
     return retVal
@@ -79,6 +80,7 @@ def write_shell_command(cmd, output_script):
             script.write(script_start + "\n")
         script.write(cmd)
     os.chmod(output_script, 0o755)
+
 
 def chown_chmod_on_fd(fd, user=-1, group=-1):
     if user == -1:
@@ -615,7 +617,7 @@ def ExpandAndResolvePath(path_to_resolve, resolve_path=True) -> Path:
     """
     # repeat calling os.path.expandvars until no change
     # because os.path.expandvars does not expand recursively
-    before_expand = path_to_resolve
+    before_expand = os.fspath(path_to_resolve)
     expanded_path = os.path.expandvars(path_to_resolve)
     while before_expand != expanded_path:
         before_expand = expanded_path

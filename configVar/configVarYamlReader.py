@@ -3,7 +3,8 @@
 """ ConfigVarYamlReader
 """
 
-import sys
+import os  # do not remove, might be used in eval
+import sys # do not remove, might be used in eval
 import re
 from contextlib import contextmanager
 import logging
@@ -16,6 +17,32 @@ internal_identifier_re = re.compile("""
                                     (?P<internal_identifier>\w*)
                                     __                  # dunder there
                                     """, re.VERBOSE)
+
+# regex to find conditionals e.g. __ifndef__(S3_BUCKET_NAME)
+conditional_re = re.compile(r"""__if(?P<if_type>.*)__\s*\((?P<condition>.+)\)""")
+
+
+def eval_conditional(conditional_text, config_vars):
+    """ read __if...(conditional) and return True is the conditional is True, False otherwise"""
+    retVal = False
+    match = conditional_re.match(conditional_text)
+    if match:
+        condition = match['condition']
+        if_type = match['if_type']
+        if if_type == "def":  # __ifdef__: if configVar is defined
+            if condition in config_vars:
+                retVal = True
+        elif if_type == "ndef":  # __ifndef__: if configVar is not defined
+            if condition not in config_vars:
+                retVal = True
+        elif if_type == "":  # "__if__: eval the condition
+            resolved_condition = config_vars.resolve_str(condition)
+            condition_result = eval(resolved_condition, globals(), locals())
+            if condition_result:
+                retVal = True
+    else:
+        log.warning(f"unknown conditional {conditional_text}")
+    return retVal
 
 
 class ConfigVarYamlReader(aYaml.YamlReader):
@@ -37,7 +64,7 @@ class ConfigVarYamlReader(aYaml.YamlReader):
     def init_specific_doc_readers(self):
         aYaml.YamlReader.init_specific_doc_readers(self)
         self.specific_doc_readers["__no_tag__"] = self.read_defines
-        self.specific_doc_readers["__unknown_tag__"] = self.read_defines
+        self.specific_doc_readers["__unknown_tag__"] = self.do_nothing_node_reader
         self.specific_doc_readers["!define"] = self.read_defines
         # !define_const is deprecated and read as non-const
         self.specific_doc_readers["!define_const"] = self.read_defines
@@ -93,25 +120,39 @@ class ConfigVarYamlReader(aYaml.YamlReader):
     def read_include_node(self, i_node, *args, **kwargs):
         pass  # override to handle __include__, __include_if_exist__ nodes
 
-    # regex to find conditionals e.g. __ifndef__(S3_BUCKET_NAME)
-    conditional_re = re.compile("""__if(?P<if_type>.*)__\s*\((?P<condition>.+)\)""")
-
     def read_conditional_node(self, identifier, contents, *args, **kwargs):
-        match = self.conditional_re.match(identifier)
-        if match:
-            condition = match['condition']
-            if_type = match['if_type']
-            if if_type == "def":     # __ifdef__: if configVar is defined
-                if condition in self.config_vars:
-                    self.read_defines(contents, **kwargs)
-            elif if_type == "ndef":  # __ifndef__: if configVar is not defined
-                if condition not in self.config_vars:
-                    self.read_defines(contents, **kwargs)
-            elif if_type == "":      # "__if__: eval the condition
-                resolved_condition = self.config_vars.resolve_str(condition)
-                condition_result = eval(resolved_condition)
-                if condition_result:
-                    self.read_defines(contents, **kwargs)
-        else:
-            log.warning(f"unknown conditional {identifier}")
+        if eval_conditional(identifier, self.config_vars):
+            self.read_defines(contents, **kwargs)
 
+
+def smart_resolve_yaml(a_node, config_vars):
+    """ read yaml node and resolve $() references
+        the main shtick is that a $() reference in a yaml sequence that itself resolves into a list will
+        extend the sequence. See doc string for class ResolveConfigVarsInYamlFile for an example
+        Note: tags that begin with ! (such as !file, !dir_cont) are preserved
+    """
+    tag = getattr(a_node, "tag", "")
+    if tag and not tag.startswith("!"):
+        tag = ""
+    if isinstance(a_node, str):
+        retVal = aYaml.YamlDumpWrap(config_vars.resolve_str(a_node))
+    elif a_node.isScalar():
+        if a_node.value:
+            retVal = aYaml.YamlDumpWrap(config_vars.resolve_str(a_node.value), tag=tag)
+        else:
+            retVal = aYaml.YamlDumpWrap(a_node.value, tag=tag)
+    elif a_node.isSequence():
+        seq = list()
+        for sub_node in a_node:
+            if sub_node.isScalar():
+                sub_item_values = config_vars.resolve_str_to_list(sub_node.value)
+                if len(sub_item_values) == 1:  # did not resolve to multiple values
+                    seq.append(smart_resolve_yaml(sub_node, config_vars))
+                else:
+                    seq.extend([smart_resolve_yaml(sub_item_value, config_vars) for sub_item_value in sub_item_values])
+            else:
+                seq.append(smart_resolve_yaml(sub_node, config_vars))
+        retVal = aYaml.YamlDumpWrap(seq, tag=tag)
+    elif a_node.isMapping():
+        retVal = {smart_resolve_yaml(key, config_vars): smart_resolve_yaml(mapped_node, config_vars) for key, mapped_node in a_node.items()}
+    return retVal

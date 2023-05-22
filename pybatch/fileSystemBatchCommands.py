@@ -1,19 +1,18 @@
-#import sys
-import stat
-import random
-import string
-import itertools
-from pathlib import Path
-import math
-from typing import Union
-import re
 import glob
+import itertools
+import math
+import os
+import random
+import re
+import stat
+import string
+from pathlib import Path
+from typing import Union
 
-import utils
-from .baseClasses import *
-from .subprocessBatchCommands import RunProcessBase
-from .removeBatchCommands import RmFile
 from configVar import config_vars
+from .baseClasses import *
+from .removeBatchCommands import RmFile
+from .subprocessBatchCommands import RunProcessBase
 
 if sys.platform == 'win32':
     import getpass
@@ -104,7 +103,7 @@ remove_obstacles:
         self.path_to_make = path_to_make
 
     def repr_own_args(self, all_args: List[str]) -> None:
-        all_args.append(self.unnamed__init__param(self.path_to_make))
+        all_args.append(self.unnamed__init__param(self.path_to_make, resolve_path=True))
 
     def progress_msg_self(self):
         the_progress_msg = f"Create directory {self.path_to_make}"
@@ -186,12 +185,14 @@ class MakeDirs(MakeDir):
 class Touch(PythonBatchCommandBase):
     """ Create an empty file if it does not already exist or update modification time to now if file exist"""
 
-    def __init__(self, path: os.PathLike, **kwargs) -> None:
+    def __init__(self, path: os.PathLike, only_if_already_exists=False, **kwargs) -> None:
         super().__init__(**kwargs)
         self.path = path
+        self.only_if_already_exists = only_if_already_exists
 
     def repr_own_args(self, all_args: List[str]) -> None:
         all_args.append(self.unnamed__init__param(self.path))
+        all_args.append(self.optional_named__init__param("only_if_already_exists", self.only_if_already_exists, False))
 
     def progress_msg_self(self):
         return f"""{self.__class__.__name__} to '{self.path}'"""
@@ -199,18 +200,18 @@ class Touch(PythonBatchCommandBase):
     def __call__(self, *args, **kwargs):
         PythonBatchCommandBase.__call__(self, *args, **kwargs)
         resolved_path = utils.ExpandAndResolvePath(self.path)
-        if resolved_path.is_dir():
+        if resolved_path.is_dir() or resolved_path.is_file():
             os.utime(resolved_path)
-        else:
+        elif not self.only_if_already_exists:
             with MakeDir(resolved_path.parent, report_own_progress=False) as md:
                 md()
                 with open(resolved_path, 'a') as tfd:
-                    os.utime(resolved_path, None)
+                    os.utime(resolved_path)
 
 
 class Cd(PythonBatchCommandBase):
     """ change current working directory to 'path'
-        when called as a context manager (with statement), previous working directory will be restored on __exit__
+        when called as a context manager ('with' statement), the previous working directory will be restored on __exit__()
     """
 
     def __init__(self, path: os.PathLike, **kwargs) -> None:
@@ -245,7 +246,7 @@ class Cd(PythonBatchCommandBase):
 
 class CdStage(Cd, essential=False):
     """ change current working directory to 'path' and enter a new Stage
-        when called as a context manager (with statement), previous working directory will be restored on __exit__
+        when called as a context manager ('with' statement), the previous working directory will be restored on __exit__()
     """
 
     def __init__(self, stage_name: str, path: os.PathLike, *titles, **kwargs) -> None:

@@ -1,14 +1,10 @@
 #!/usr/bin/env python3.9
 
 
-import sys
+import collections
+import inspect
 import os
 import re
-import collections
-
-from typing import Any, Dict, List, Set, Tuple
-
-import utils
 
 
 def quoteme(to_quote, quote_char):
@@ -86,23 +82,31 @@ def quoteme_raw_if_string(some_thing):
         return str(some_thing)
 
 
-def quoteme_raw_by_type(some_thing, config_vars=None):
+def quoteme_raw_by_type(some_thing, config_vars=None, resolve_path=False):
     retVal = None
     if isinstance(some_thing, types_that_do_not_need_quotation):
         retVal = str(some_thing)
     elif isinstance(some_thing, str):
         if config_vars is not None:
             some_thing = config_vars.resolve_str(some_thing)
+        if resolve_path:
+            from utils import ExpandAndResolvePath
+            some_thing = os.fspath(ExpandAndResolvePath(some_thing))
         retVal = quoteme_raw_string(some_thing)
     elif isinstance(some_thing, os.PathLike):
+        if resolve_path:
+            from utils import ExpandAndResolvePath
+            some_thing = ExpandAndResolvePath(some_thing)
         retVal = quoteme_raw_by_type(os.fspath(some_thing), config_vars)
     elif isinstance(some_thing, collections.abc.Sequence):
-       retVal = "".join(("[", ",".join(quoteme_raw_by_type(t, config_vars) for t in some_thing),"]"))
+        retVal = "".join(("[", ",".join(quoteme_raw_by_type(t, config_vars) for t in some_thing), "]"))
     elif isinstance(some_thing, collections.abc.Mapping):
         item_strs = list()
         for k, v in sorted(some_thing.items()):
             item_strs.append(f"""{quoteme_raw_by_type(k)}:{quoteme_raw_by_type(v, config_vars)}""")
         retVal = "".join(("{", ",".join(item_strs), "}"))
+    elif inspect.isclass(some_thing):
+        retVal = some_thing.__name__
     return retVal
 
 
@@ -191,6 +195,30 @@ def str_to_bool_int(the_str):
 def is_iterable_but_not_str(obj_to_check):
     retVal = hasattr(obj_to_check, '__iter__') and not isinstance(obj_to_check, str)
     return retVal
+
+
+def str_to_int(the_str):
+    """ python's builtin int function allows for underscore characters when converting string to int.
+        So int("1_3") returns 13. instl however does not want to consider such strings as integers.
+        For example, a configVar "ExternalVersion_underscore" might hold a value such as "1_2_3_4"
+        and calling configVar["ExternalVersion_underscore"].int() should raise Value error instead
+        of returning 1234.
+        So str_to_int overcomes this problem by raising ValueError when converting the int back to
+        string and the result is not identical with the original string.
+        This also make strings starting with 0, to not be considered ints
+    """
+    as_int = int(the_str)
+    if str(as_int) != the_str:  # '012' should be considered a string not an int
+        raise ValueError(f"{the_str} is not considered int")
+    return as_int
+
+
+def str_to_float(the_str):
+    """ See doc string for str_to_int function above
+    """
+    if isinstance(the_str, str) and "_" in the_str:
+        raise ValueError(f"{the_str} contains '_' char and therefor not considered a floating number")
+    return float(the_str)
 
 
 if __name__ == "__main__":

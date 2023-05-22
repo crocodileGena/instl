@@ -1,25 +1,27 @@
-import os
-from pathlib import Path
-import keyword
+import functools
 import json
-import re
-from typing import List
+import keyword
 import logging
+import os
+import re
 from collections.abc import Iterable
-
-from configVar import config_vars
-from configVar import ConfigVarYamlReader
-import utils
+from pathlib import Path
+from typing import List
+import yaml
+import io
 
 import pybatch
+import utils
+from configVar import config_vars, ConfigVarYamlReader, smart_resolve_yaml
+import aYaml
 
 log = logging.getLogger(__name__)
 
 need_path_resolving_re = re.compile(".+(DIR|PATH|FOLDER|FOLDERS)(__)?$")
 
 
-class AnonymousAccum(pybatch.PythonBatchCommandBase, essential=False, call__call__=False, is_context_manager=False, is_anonymous=True):
-
+class AnonymousAccum(pybatch.PythonBatchCommandBase, essential=False, call__call__=False, is_context_manager=False,
+                     is_anonymous=True):
     """ AnonymousAccum: a container for other PythonBatchCommands,
         AnonymousAccum is not meant to be written to python-batch file or executed - only the
         contained commands will be.
@@ -40,7 +42,7 @@ class AnonymousAccum(pybatch.PythonBatchCommandBase, essential=False, call__call
 
 
 class RaiseException(pybatch.PythonBatchCommandBase):
-    """ raise a specific exception - for debugging """
+    """ raise a specific exception """
     def __init__(self, exception_type, exception_message, **kwargs) -> None:
         super().__init__(**kwargs)
         self.exception_type = exception_type
@@ -58,6 +60,20 @@ class RaiseException(pybatch.PythonBatchCommandBase):
     def __call__(self, *args, **kwargs) -> None:
         raise self.exception_type(self.exception_message)
 
+
+class FailIfFileNotFound(RaiseException):
+    """ raise FileNotFoundError exception if a file is missing """
+    def __init__(self, file_to_find, **kwargs):
+        super().__init__(FileNotFoundError, f"FileNotFound: {file_to_find}", **kwargs)
+        self.file_to_find = file_to_find
+
+    def repr_own_args(self, all_args: List[str]) -> None:
+        all_args.append(self.unnamed__init__param(self.file_to_find, resolve_path=True))
+
+    def __call__(self, *args, **kwargs) -> None:
+        if not Path(self.file_to_find).is_file():
+            print(f"error: File not found: {self.file_to_find}")
+            super().__call__(*args, **kwargs)
 
 class Stage(pybatch.PythonBatchCommandBase, essential=False, call__call__=False, is_context_manager=True):
     """ Stage: a container for other PythonBatchCommands, that has a name and is used as a context manager ("with").
@@ -153,11 +169,11 @@ class Print(pybatch.PythonBatchCommandBase, essential=False, call__call__=True, 
 
 
 class Remark(pybatch.PythonBatchCommandBase, call__call__=False, is_context_manager=False, kwargs_defaults={'own_progress_count': 0}):
-    """ write a remark in code
+    """ write a remark in python code produced during installation
     """
-    def __init__(self, remark, **kwargs) -> None:
+    def __init__(self, remark_text, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.remark_text = remark
+        self.remark_text = remark_text
 
     def __repr__(self) -> str:
         the_repr = f'''# {self.remark_text}'''
@@ -206,7 +222,7 @@ class PythonVarAssign(pybatch.PythonBatchCommandBase, call__call__=False, is_con
             adjusted_values = list()
             for val in self.var_values:
                 try:
-                    adjusted_values.append(int(val))
+                    adjusted_values.append(utils.str_to_int(val))
                 except:
                     if need_path_resolving:
                         val = os.fspath(Path(os.path.expandvars(val)).resolve())
@@ -242,11 +258,15 @@ class ConfigVarAssign(pybatch.PythonBatchCommandBase, essential=False, call__cal
         the_repr = ""
         if any(self.var_values):
             adjusted_values = list()
+            is_path_var = config_vars.does_config_var_name_means_path(self.var_name)
             for val in self.var_values:
-                try:
-                    adjusted_values.append(int(val))
-                except:
-                    adjusted_values.append(utils.quoteme_raw_by_type(val))
+                if is_path_var:
+                    adjusted_values.append(utils.quoteme_raw_by_type(Path(os.path.expandvars(val)).resolve()))
+                else:
+                    try:
+                        adjusted_values.append(utils.str_to_int(val))
+                    except Exception as ex:
+                        adjusted_values.append(utils.quoteme_raw_by_type(val))
             if len(adjusted_values) == 1:
                 the_repr = f'''config_vars['{self.var_name}'] = {adjusted_values[0]}'''
             else:
@@ -264,7 +284,7 @@ class ConfigVarAssign(pybatch.PythonBatchCommandBase, essential=False, call__cal
 
 
 class ConfigVarPrint(pybatch.PythonBatchCommandBase, call__call__=True, is_context_manager=False):
-    """
+    """ Prints the resolved value of a configVar to a file
     """
     def __init__(self, var_name, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -298,7 +318,8 @@ class PythonBatchRuntime(pybatch.PythonBatchCommandBase, call__call__=False, is_
         time_diff = self.exit_time-self.enter_time
         hours, remainder = divmod(time_diff, 3600)
         minutes, seconds = divmod(remainder, 60)
-        log.info(f"{self.name} Time: {int(hours):02}:{int(minutes):02}:{int(seconds)}")
+        milliseconds = int((seconds - int(seconds))*1000)
+        log.info(f"{self.name} Time: {int(hours):02}:{int(minutes):02}:{int(seconds):02}.{milliseconds:03}")
         pybatch.PythonBatchCommandBase.stage_stack.pop()
         self.exit_self(suppress_exception)
 
@@ -324,46 +345,64 @@ class PythonBatchRuntime(pybatch.PythonBatchCommandBase, call__call__=False, is_
 
 class ResolveConfigVarsInFile(pybatch.PythonBatchCommandBase):
     def __init__(self, unresolved_file, resolved_file=None, config_file=None, config_files=None, raise_if_unresolved=False,
-                 temp_config_vars=None, resolve_indicator='$', **kwargs):
+                 temp_config_vars=None, resolve_indicator='$', unresolve_indicator=None, compare_dates=False, **kwargs):
         """
         read a file and resolve all references to config_vars.
         :param unresolved_file: file to resolve
         :param resolved_file: file to write resolved output, if None will overwrite unresolved_file
-        :param config_file: deprecated, replaced by config_files, still supported for backward compatibility
+        :param config_file: deprecated, replaced by param config_files, still supported for backward compatibility
         :param config_files: additional files to read config_vars definitions from
         :param raise_if_unresolved: when True, will raise exception if any unresolved $(...) references are left
         :param resolve_indicator: config vars marked with this char (default '$') will be resolved
+        :param unresolve_indicator: config marked with this char (probably '@') will be turned to config vars with normal resolve_indicator
+            after the resolve. This allows to skip resolving config vars that should only be resolved later.
+        :param compare_dates: when True skip resolving if both files exist and resolved_file is younger than unresolved_file and the config files
         """
         super().__init__(**kwargs)
-        self.unresolved_file = unresolved_file
+        self.unresolved_file = Path(unresolved_file)
         if resolved_file:
-            self.resolved_file = resolved_file
+            self.resolved_file = Path(resolved_file)
         else:
             self.resolved_file = self.unresolved_file
-        self.config_files = config_files
+        self.config_files = list()
+        if config_files:
+            if isinstance(config_files, list):
+                self.config_files.extend(Path(cf) for cf in config_files)
+            else:
+                self.config_files.append(config_files)
         if config_file:
-            if not isinstance(self.config_files, list):
-                self.config_files = list()
-            self.config_files.append(config_file)
+            self.config_files.append(Path(config_file))
         self.raise_if_unresolved = raise_if_unresolved
         self.temp_config_vars = temp_config_vars
         self.resolve_indicator = resolve_indicator
+        self.compare_dates = compare_dates
+        self.unresolve_indicator = unresolve_indicator
 
     def repr_own_args(self, all_args: List[str]) -> None:
-        all_args.append(self.unnamed__init__param(self.unresolved_file))
+        all_args.append(self.unnamed__init__param(self.unresolved_file, resolve_path=True))
         if self.resolved_file != self.unresolved_file:
-            all_args.append(self.unnamed__init__param(self.resolved_file))
+            all_args.append(self.unnamed__init__param(self.resolved_file, resolve_path=True))
         all_args.append(self.optional_named__init__param("config_files", self.config_files, None))
         all_args.append(self.optional_named__init__param("resolve_indicator", self.resolve_indicator, '$'))
         if self.temp_config_vars:
             complete_repr = f"temp_config_vars="+json.dumps(self.temp_config_vars)
             all_args.append(complete_repr)
+        all_args.append(self.optional_named__init__param("compare_dates", self.compare_dates, False))
+        all_args.append(self.optional_named__init__param("unresolve_indicator", self.unresolve_indicator, None))
 
     def progress_msg_self(self) -> str:
         return f'''resolving {self.unresolved_file} to {self.resolved_file}'''
 
     def __call__(self, *args, **kwargs) -> None:
         pybatch.PythonBatchCommandBase.__call__(self, *args, **kwargs)
+        if self.compare_dates and self.resolved_file.exists() and self.resolved_file != self.unresolved_file:
+            resolved_mod_time = self.resolved_file.stat().st_mtime
+            sources_max_mod_time = self.unresolved_file.stat().st_mtime
+            if self.config_files:
+                sources_max_mod_time = functools.reduce(max, (cf.stat().st_mtime for cf in self.config_files), sources_max_mod_time)
+            if resolved_mod_time > sources_max_mod_time:  # sources have not changed
+                return
+
         with config_vars.push_scope_context() as scope_context:
             if self.temp_config_vars:
                 config_vars.update(self.temp_config_vars)
@@ -387,7 +426,130 @@ class ResolveConfigVarsInFile(pybatch.PythonBatchCommandBase):
                 all_unresolved = unresolved_re.findall(resolved_text)
                 if all_unresolved:
                     unresolved_references = ", ".join(list(set(all_unresolved)))
-                    raise ValueError(f"unresolved config_vars in {self.unresolved_file}: {unresolved_references}")
+                    raise ValueError(f"unresolved config_vars in {self.unresolved_file}:\n{unresolved_references}")
+
+            if self.unresolve_indicator:  # replace all the @( with $(
+                resolved_text = resolved_text.replace(f"{self.unresolve_indicator}(", f"{self.resolve_indicator}(")
+
+            with utils.utf8_open_for_write(self.resolved_file, "w") as wfd:
+                wfd.write(resolved_text)
+
+
+
+class ResolveConfigVarsInYamlFile(pybatch.PythonBatchCommandBase):
+    def __init__(self, unresolved_file, resolved_file=None, config_files=None, raise_if_unresolved=False,
+                 temp_config_vars=None, resolve_indicator='$', unresolve_indicator=None, compare_dates=False, **kwargs):
+        """
+        read a Yaml file and resolve all references to config_vars.
+        ResolveConfigVarsInYamlFile is different from ResolveConfigVarsInFile:
+        - uses config_vars.resolve_str_to_list to resolve items in yaml sequences and the resulting list
+            extends the sequence. For example if we define in the config_files:
+
+        GUITARISTS: [John, George]
+
+        and the yaml to be resolved is:
+        BEATLES:
+            - Paul
+            - $(GUITARISTS)
+            - Ringo
+
+        the resolved yaml will be:
+        BEATLES:
+            - Paul
+            - John
+            - George
+            - Ringo
+
+        Note: configVar definitions ARE NOT READ from the yaml to be resolved only from the config_files
+        :param unresolved_file: file to resolve
+        :param resolved_file: file to write resolved output, if None will overwrite unresolved_file
+        :param config_files: additional files to read config_vars definitions from
+        :param raise_if_unresolved: when True, will raise exception if any unresolved $(...) references are left
+        :param resolve_indicator: config vars marked with this char (default '$') will be resolved
+        :param unresolve_indicator: config marked with this char (probably '@') will be turned to config vars with normal resolve_indicator
+            after the resolve. This allows to skip resolving config vars that should only be resolved later.
+        :param compare_dates: when True skip resolving if both files exist and resolved_file is younger than unresolved_file and the config files
+        """
+        super().__init__(**kwargs)
+        self.unresolved_file = Path(unresolved_file)
+        if resolved_file:
+            self.resolved_file = Path(resolved_file)
+        else:
+            self.resolved_file = self.unresolved_file
+        self.config_files = list()
+        if config_files:
+            if isinstance(config_files, list):
+                self.config_files.extend(Path(cf) for cf in config_files)
+            else:
+                self.config_files.append(config_files)
+        self.raise_if_unresolved = raise_if_unresolved
+        self.temp_config_vars = temp_config_vars
+        self.resolve_indicator = resolve_indicator
+        self.compare_dates = compare_dates
+        self.unresolve_indicator = unresolve_indicator
+
+    def repr_own_args(self, all_args: List[str]) -> None:
+        all_args.append(self.unnamed__init__param(self.unresolved_file))
+        if self.resolved_file != self.unresolved_file:
+            all_args.append(self.unnamed__init__param(self.resolved_file))
+        all_args.append(self.optional_named__init__param("config_files", self.config_files, None))
+        all_args.append(self.optional_named__init__param("resolve_indicator", self.resolve_indicator, '$'))
+        if self.temp_config_vars:
+            complete_repr = f"temp_config_vars="+json.dumps(self.temp_config_vars)
+            all_args.append(complete_repr)
+        all_args.append(self.optional_named__init__param("compare_dates", self.compare_dates, False))
+        all_args.append(self.optional_named__init__param("unresolve_indicator", self.unresolve_indicator, None))
+
+    def progress_msg_self(self) -> str:
+        return f'''resolving {self.unresolved_file} to {self.resolved_file}'''
+
+    def __call__(self, *args, **kwargs) -> None:
+        pybatch.PythonBatchCommandBase.__call__(self, *args, **kwargs)
+        if self.compare_dates and self.resolved_file.exists() and self.resolved_file != self.unresolved_file:
+            resolved_mod_time = self.resolved_file.stat().st_mtime
+            sources_max_mod_time = self.unresolved_file.stat().st_mtime
+            if self.config_files:
+                sources_max_mod_time = functools.reduce(max, (cf.stat().st_mtime for cf in self.config_files), sources_max_mod_time)
+            if resolved_mod_time > sources_max_mod_time:  # sources have not changed
+                return
+
+        with config_vars.push_scope_context() as scope_context:
+            if self.temp_config_vars:
+                config_vars.update(self.temp_config_vars)
+            if self.config_files:
+                reader = ConfigVarYamlReader(config_vars)
+                if isinstance(self.config_files, (str, os.PathLike)):
+                    reader.read_yaml_file(self.config_files)
+                elif isinstance(self.config_files, Iterable):
+                    for config_file in self.config_files:
+                        reader.read_yaml_file(config_file)
+                else:
+                    raise ValueError(f"member self.config_files is not a string or a list: {self.config_files}")
+
+            with utils.utf8_open_for_read(self.unresolved_file, "r") as rfd:
+                yaml_docs = list(yaml.compose_all(rfd))
+
+            resolved_docs = list()
+            for ydoc in yaml_docs:
+                resolved_doc = smart_resolve_yaml(ydoc, config_vars)
+                resolved_docs.append(resolved_doc)
+
+            resolved_text = io.StringIO()
+            # write the resolved text to memory, so we can check it in case self.raise_if_unresolved==True
+            for rdoc in resolved_docs:
+                aYaml.writeAsYaml(aYaml.YamlDumpWrap(rdoc, sort_mappings=False), resolved_text, top_level_blank_line=False)
+
+            resolved_text = resolved_text.getvalue()
+
+            if self.raise_if_unresolved:
+                unresolved_re = re.compile(rf"""[{self.resolve_indicator}]\(.*?\)""")
+                all_unresolved = unresolved_re.findall(resolved_text)
+                if all_unresolved:
+                    unresolved_references = ", ".join(list(set(all_unresolved)))
+                    raise ValueError(f"unresolved config_vars in {self.unresolved_file}:\n{unresolved_references}")
+
+            if self.unresolve_indicator:  # replace all the @( with $(
+                resolved_text = resolved_text.replace(f"{self.unresolve_indicator}(", f"{self.resolve_indicator}(")
 
             with utils.utf8_open_for_write(self.resolved_file, "w") as wfd:
                 wfd.write(resolved_text)

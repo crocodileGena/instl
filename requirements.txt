@@ -2,8 +2,7 @@ appdirs
 future
 networkx
 packaging
-psutil
-PyInstaller
-PyYAML
+PyInstaller==5.3
+PyYAML --no-binary=PyYAML
 requests
 xmltodict

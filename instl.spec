@@ -10,22 +10,41 @@ import datetime
 import re
 from subprocess import check_output
 from pathlib import Path
+import yaml
 
 block_cipher = None
 
+
+with open("defaults/main.yaml", 'r') as stream:
+    try:
+        for a_node in yaml.compose_all(stream):
+            for _contents in a_node.value:
+                identifier,contents = _contents
+                if identifier.value == '__INSTL_VERSION__':
+                    version = ".".join([i.value for i in contents.value ])
+                    break
+    except yaml.YAMLError as exc:
+        print(exc)
+
+
 a = Analysis(['instl'],
              pathex=['instl'],
-             binaries=None,
-             datas=None,
-             hiddenimports=['distutils', 'packaging', 'packaging.version', 'packaging.specifiers', 'packaging.requirements', 'xmltodict'],
-             hookspath=None,
-             runtime_hooks=None,
+             binaries=[],
+             datas=[],
+             hiddenimports=['distutils',
+                            'packaging',
+                            'packaging.version',
+                            'packaging.specifiers',
+                            'packaging.requirements',
+                            'xmltodict'],
+             hookspath=[],
+             runtime_hooks=[],
              excludes=['PyQt4', 'matplotlib', "PIL", "numpy", "wx", "tornado", "networkx",
                          "pygraphviz", "unittest", "nose", 'PyInstaller',
                         "tkinter", "Tkinter", "scipy", "setuptools", "colorama",
                         "botocore", "boto3", "redis", "rich"],
-             win_no_prefer_redirects=None,
-             win_private_assemblies=None,
+             win_no_prefer_redirects=False,
+             win_private_assemblies=False,
              cipher=block_cipher)
 
 instl_defaults_path = os.path.join("defaults")
@@ -72,7 +91,8 @@ exe = EXE(pyz,
           strip=None,
           upx=False, # does not work even if True
           runtime_tmpdir="runtime_tmpdir",
-          console=True )
+          console=True,
+           target_arch='universal2')
 coll = COLLECT(exe,
                a.binaries,
                a.zipfiles,
@@ -83,5 +103,6 @@ coll = COLLECT(exe,
 
 app = BUNDLE(coll,
          name='instl.bundle',
+         version=version,
          icon=None,
          bundle_identifier=None)

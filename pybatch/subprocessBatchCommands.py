@@ -1,24 +1,27 @@
-import os
-import sys
-import stat
 import abc
-from pathlib import Path
-import shlex
 import collections
+import logging
+import os
+import shlex
+import stat
 import subprocess
-from typing import List
-from threading import Thread
-import utils
-import psutil
+import sys
 import time
+from pathlib import Path
+from threading import Thread
+from typing import List
+
+import psutil
+
+import utils
 from .baseClasses import PythonBatchCommandBase
 
-import logging
 log = logging.getLogger(__name__)
 
 
 class RunProcessBase(PythonBatchCommandBase, call__call__=True, is_context_manager=True,
-                     kwargs_defaults={"stderr_means_err": True, "capture_stdout": False, "out_file": None,"detach": False}):
+                     kwargs_defaults={"stderr_means_err": True, "capture_stdout": False, "out_file": None,
+                                      "detach": False}):
     """ base class for classes pybatch commands that need to spawn a subprocess
         input, output, stderr can read/writen to files according to in_file, out_file, err_file
         Some subprocesses write to stderr but return exit code 0, in which case if stderr_means_err==True and something was written
@@ -74,7 +77,6 @@ class RunProcessBase(PythonBatchCommandBase, call__call__=True, is_context_manag
             if self.out_file:
                 if isinstance(self.out_file, (str, os.PathLike, bytes)):
                     out_file = Path(self.out_file).resolve()
-                    out_file.parent.mkdir(parents=True, exist_ok=True)
                     out_stream = utils.utf8_open_for_write(out_file, "w")
                     log.info(f"output will be written to {out_file}")
                     need_to_close_out_file = True
@@ -119,10 +121,10 @@ class RunProcessBase(PythonBatchCommandBase, call__call__=True, is_context_manag
     def handle_completed_process(self, completed_process):
         pass
 
-    def log_result(self, log_lvl, message, exc_val):
+    def log_result(self, log_lvl, message, exception_obj):
         if self.stderr:
             message += f'; STDERR: {utils.unicodify(self.stderr)}'
-        super().log_result(log_lvl, message, exc_val)
+        super().log_result(log_lvl, message, exception_obj)
 
     def repr_own_args(self, all_args: List[str]) -> None:
         pass
@@ -307,7 +309,7 @@ class ParallelRun(PythonBatchCommandBase, kwargs_defaults={'action_name': None, 
             self.increment_progress()
 
 
-class Exec(PythonBatchCommandBase):
+class ExecPython(PythonBatchCommandBase):
     def __init__(self, python_file, config_files=None, reuse_db=True, args=None, **kwargs):
         super().__init__(**kwargs)
         self.python_file = python_file
@@ -337,6 +339,13 @@ class Exec(PythonBatchCommandBase):
                 sys.argv = [os.fspath(self.python_file), *self.args]
             exec(py_compiled, globals())
             sys.argv = original_argv
+
+
+class Exec(ExecPython):
+    """ deprecated use ExecPython inside"""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
 
 class RunInThread(PythonBatchCommandBase):
     """
@@ -427,7 +436,7 @@ class Subprocess(RunProcessBase):
 class ExternalPythonExec(Subprocess):
     """ A class that enables running python processes under the native python installed on the machine"""
     def __init__(self, *subprocess_args, **kwargs):
-        '''Setting subprocess_exe to an empty string to exclude it from the repr'''
+        """Setting subprocess_exe to an empty string to exclude it from the repr"""
         super().__init__('', *subprocess_args, **kwargs)
 
     def repr_own_args(self, all_args: List[str]):
