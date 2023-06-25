@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 class RunProcessBase(PythonBatchCommandBase, call__call__=True, is_context_manager=True,
                      kwargs_defaults={"stderr_means_err": True, "capture_stdout": False, "out_file": None,
-                                      "detach": False, "stderr_parser": None}):
+                                      "detach": False}):
     """ base class for classes pybatch commands that need to spawn a subprocess
         input, output, stderr can read/writen to files according to in_file, out_file, err_file
         Some subprocesses write to stderr but return exit code 0, in which case if stderr_means_err==True and something was written
@@ -39,7 +39,6 @@ class RunProcessBase(PythonBatchCommandBase, call__call__=True, is_context_manag
         self.shell = kwargs.get('shell', False)
         self.script = kwargs.get('script', False)
         self.stderr = ''  # for log_results
-        self.stderr_parser = kwargs.get("stderr_parser", None) # TODO IdanMZ Ask shai
 
 
     @abc.abstractmethod
