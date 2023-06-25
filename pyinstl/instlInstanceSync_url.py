@@ -4,6 +4,7 @@ from collections import defaultdict
 import urllib
 import sys
 from pathlib import PurePath
+import subprocess
 if sys.platform == 'win32':
     import win32api
 
@@ -94,15 +95,31 @@ class InstlInstanceSync_url(InstlInstanceSync):
 
             num_files_to_download = int(config_vars["__NUM_FILES_TO_DOWNLOAD__"])
 
-            # TODO IDANMZ
-            #parallel_run_config_file_path = curl_config_folder.joinpath(config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).parallel-run"))
-            #self.create_parallel_run_config_file(parallel_run_config_file_path, config_file_list)
-            #dl_commands += ParallelRun(parallel_run_config_file_path, shell=False, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
+            if self.instlObj.dl_tool.is_supported is None or not self.instlObj.dl_tool.is_supported():
+                parallel_run_config_file_path = curl_config_folder.joinpath(config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).parallel-run"))
+                self.create_parallel_run_config_file(parallel_run_config_file_path, config_file_list)
+                dl_commands += ParallelRun(parallel_run_config_file_path, shell=False, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
+            else:
+                # Download using combined file
+                for config_file in config_file_list:
+                    exe_name = config_vars.resolve_str("$(DOWNLOAD_TOOL_PATH)")
+                    parser = self.instlObj.dl_tool.stderr_parser()
 
-            # Download using combined file
-            for config_file in config_file_list:
-                dl_commands += Subprocess("$(DOWNLOAD_TOOL_PATH)", "--config", self.get_normalized_path(config_file),
-                                          stderr_means_err=False, stderr_parser=self.instlObj.dl_tool.stderr_parser)
+                    proc = subprocess.Popen(
+                        f"{exe_name} --config '{self.get_normalized_path(config_file)}'",
+                        shell=True,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True,
+                    )
+
+                    # Read and process the stderr output line by line
+                    for line in proc.stderr:
+                        parser(line)
+
+                    proc.wait()  # Wait for the process to complete
+
+                    # dl_commands += Subprocess("$(DOWNLOAD_TOOL_PATH)", "--config", self.get_normalized_path(config_file),
+                    #                       stderr_means_err=False, stderr_parser=self.instlObj.dl_tool.stderr_parser)
 
             if num_files_to_download > 1:
                 dl_end_message = f"Downloading {num_files_to_download} files done"

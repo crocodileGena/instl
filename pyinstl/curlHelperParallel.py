@@ -83,14 +83,18 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
         # probably "$(DOWNLOAD_TOOL_PATH)" --version
         return True
 
-    def stderr_parser(self):
+    def stderr_parser(self, max_files, previous_count = 0):
         r = compile(r'[0-9-]+\s+[0-9-]+\s+([a-z0-9.]+)\s+0\s+(\d+).+--:--:--\s+([0-9a-z.]+)\s*$', IGNORECASE)
+
+        max_files = str(max_files) if max_files is not None else "..."
+
 
         def parser(line):
             m = r.findall(line)
             if len(m) > 0 and len(m[0]) > 2:
                 downloaded_size, downloaded_files, download_speed = m[0]
-                log.info(f"Progress: {downloaded_files} of ...; {downloaded_size} @ {download_speed}")
+                downloaded_files = str(int(downloaded_files) + previous_count)
+                log.info(f"Download progress: {downloaded_files} of {max_files}; Downloaded {downloaded_size}, Speed {download_speed}.")
 
         return parser
 
