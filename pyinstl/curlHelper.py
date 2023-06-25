@@ -1,12 +1,8 @@
 #!/usr/bin/env python3.9
-
-
 import os
 import abc
 import itertools
-import re
-from pathlib import Path, PurePath
-import sys
+from pathlib import PurePath
 import functools
 import logging
 log = logging.getLogger()
@@ -14,37 +10,6 @@ log = logging.getLogger()
 import utils
 from configVar import config_vars  # √
 from . import connectionBase
-
-
-def create_options_file(config_file_path):
-    connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
-    max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
-    retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
-    retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
-    sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
-
-    file_name = '-'.join((os.fspath(config_file_path), 'opt'))
-
-    file = utils.utf8_open_for_write(file_name, "w")
-    file_header_text = f"""
-    header=Cookie: {sync_urls_cookie}
-    log-level=notice
-    summary-interval=2
-    auto-file-renaming=false
-    allow-overwrite=true
-    http-accept-gzip=true
-    enable-mmap=true
-    max-concurrent-downloads=1024
-    max-connection-per-server=5
-    connect-timeout={connect_time_out}
-    timeout={max_time}
-    max-tries={retries}
-    retry-wait={retry_delay}
-    """
-    file.write(file_header_text)
-    file.close()
-
-    return file_name
 
 
 class CUrlHelper(object, metaclass=abc.ABCMeta):
@@ -109,18 +74,53 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
             fixed_path = short_file_path.replace("\\", "\\\\")
         return fixed_path
 
+    # TODO IdanMZ implement
+    def is_parallel_supported(self):
+        # probably "$(DOWNLOAD_TOOL_PATH)" --version
+        return True
+
+    def get_config_header(self, basename):
+        sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
+        connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
+        max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
+        retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
+        retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
+        cookie_text = f"cookie = {sync_urls_cookie}\n" if sync_urls_cookie else ""
+
+        if self.is_parallel_supported():
+            verbosity = "progress-bar"
+            write_out = ""
+            parallel = "parallel"
+        else:
+            verbosity = "silent"
+            write_out = f"Progress: ... of ...; {basename}: {CUrlHelper.curl_write_out_str}"
+            parallel = ""
+
+        return  f"""
+insecure
+raw
+fail
+{verbosity}
+{parallel}
+show-error
+compressed
+create-dirs
+connect-timeout = {connect_time_out}
+max-time = {max_time}
+retry = {retries}
+retry-delay = {retry_delay}
+{cookie_text}
+{write_out}
+"""
+
+
     def create_config_files(self, curl_config_file_path, num_config_files):
         file_name_list = list()
 
-        if self.get_num_urls_to_download() > 0:
-            # connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
-            # max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
-            # retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
-            # retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
-            #
-            # sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
+        log.warning(f"""IDANMZ create_config_files support parallel? { self.is_parallel_supported()}, Download {self.get_num_urls_to_download()} files""")
 
-            actual_num_config_files = int(max(0, min(len(self.urls_to_download), num_config_files)))
+        if self.get_num_urls_to_download() > 0:
+            actual_num_config_files = 1 if self.is_parallel_supported() else int(max(0, min(len(self.urls_to_download), num_config_files)))
             if self.urls_to_download_last:
                 actual_num_config_files += 1
             num_digits = max(len(str(actual_num_config_files)), 2)
@@ -133,31 +133,10 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
                 wfd_list.append(wfd)
 
             # write the header in each file
-            # for wfd in wfd_list:
-                # basename = os.path.basename(wfd.name)
-                # if sync_urls_cookie:
-                #     cookie_text = f"cookie = {sync_urls_cookie}\n"
-                # else:
-                #     cookie_text = ""
-                # curl_write_out_str = CUrlHelper.curl_write_out_str
-#                 file_header_text = f"""
-# insecure
-# raw
-# fail
-# silent
-# show-error
-# compressed
-# create-dirs
-# connect-timeout = {connect_time_out}
-# max-time = {max_time}
-# retry = {retries}
-# retry-delay = {retry_delay}
-# {cookie_text}
-# write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
-#
-#
-# """
-#                 wfd.write(file_header_text)
+            for wfd in wfd_list:
+                basename = os.path.basename(wfd.name)
+                file_header_text = self.get_config_header(basename)
+                wfd.write(file_header_text)
 
             last_file = None
             if self.urls_to_download_last:
@@ -167,17 +146,13 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
                 """ smaller files should be downloaded first so the progress bar gets moving early. """
                 return l[2] - r[2]  # non Info.xml files are sorted by size
 
-            def get_path(filename):
-                return ('/' if '/' in str(filename) else '\\').join(re.split(r'[/\\]', str(filename))[:-1])
-
             wfd_cycler = itertools.cycle(wfd_list)
             url_num = 0
-            sorted_by_size = sorted(self.urls_to_download, key=functools.cmp_to_key(url_sorter))
+            sorted_by_size = sorted(self.urls_to_download, key=functools.cmp_to_key(url_sorter)) # TODO IdanMZ - why?
             for url, path, size in sorted_by_size:
                 fixed_path = self.fix_path(path)
-                out_dir = get_path(fixed_path)
                 wfd = next(wfd_cycler)
-                wfd.write(f'''{url}\n  dir={out_dir}\n\n''')
+                wfd.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
                 url_num += 1
 
             for wfd in wfd_list:
@@ -185,16 +160,13 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
 
             for url, path, size in self.urls_to_download_last:
                 fixed_path = self.fix_path(path)
-                out_dir = get_path(fixed_path)
-                last_file.write(f'''{url}\n  dir={out_dir}\n\n''')
+                last_file.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
                 url_num += 1
 
             # insert None which means "wait" before the config file that downloads urls_to_download_last.
             # but only if there were actually download files other than urls_to_download_last.
             # it might happen that there are only urls_to_download_last - so no need to "wait".
-            # if last_file and len(wfd_list) > 0:
-            #     file_name_list.insert(-1, None)
-
-        file_name_list.insert(0, create_options_file(curl_config_file_path))
+            if last_file and len(wfd_list) > 0:
+                file_name_list.insert(-1, None)
 
         return file_name_list
