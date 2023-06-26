@@ -101,9 +101,9 @@ class InstlInstanceSync_url(InstlInstanceSync):
                 dl_commands += ParallelRun(parallel_run_config_file_path, shell=False, action_name="Downloading", own_progress_count=num_files_to_download, report_own_progress=False)
             else:
                 # Download using combined file
-                for config_file in config_file_list:
+                for index, config_file in enumerate(config_file_list):
                     exe_name = config_vars.resolve_str("$(DOWNLOAD_TOOL_PATH)")
-                    parser = self.instlObj.dl_tool.stderr_parser()
+                    parser = self.instlObj.dl_tool.stderr_parser(num_files_to_download, 0 if index ==0 else  self.instlObj.dl_tool.get_num_of_urls_to_download())
 
                     proc = subprocess.Popen(
                         f"{exe_name} --config '{self.get_normalized_path(config_file)}'",

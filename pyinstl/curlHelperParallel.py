@@ -83,6 +83,9 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
         # probably "$(DOWNLOAD_TOOL_PATH)" --version
         return True
 
+    def get_num_of_urls_to_download(self):
+        return len(self.urls_to_download)
+
     def stderr_parser(self, max_files, previous_count = 0):
         r = compile(r'[0-9-]+\s+[0-9-]+\s+([a-z0-9.]+)\s+0\s+(\d+).+--:--:--\s+([0-9a-z.]+)\s*$', IGNORECASE)
 
