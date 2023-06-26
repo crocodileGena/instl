@@ -2,6 +2,9 @@
 import os
 import abc
 import itertools
+import re
+import subprocess
+from distutils.version import StrictVersion
 from pathlib import PurePath
 from re import compile, IGNORECASE
 import functools
@@ -24,11 +27,14 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
     curl_write_out_str = r'%{url_effective}, %{size_download} bytes, %{time_total} sec., %{speed_download} bps.\n'
     # for debugging:
     curl_extra_write_out_str = r'    num_connects:%{num_connects}, time_namelookup: %{time_namelookup}, time_connect: %{time_connect}, time_pretransfer: %{time_pretransfer}, time_redirect: %{time_redirect}, time_starttransfer: %{time_starttransfer}\n\n'
+    cached_is_supported = None # Lazy loading
+    min_supported_curl_version = "7.66.0"
 
     def __init__(self) -> None:
         self.urls_to_download = list()
         self.urls_to_download_last = list()
         self.short_win_paths_cache = dict()
+
 
     def add_download_url(self, url, path, verbatim=False, size=0, download_last=False):
         if verbatim:
@@ -80,8 +86,41 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
     # TODO IdanMZ implement
     @staticmethod
     def is_supported():
+        if CUrlHelperParallel.cached_is_supported is None:
+            try:
+                CUrlHelperParallel.cached_is_supported = False
+
+                #exe_name = config_vars.resolve_str("$(DOWNLOAD_TOOL_PATH)") # TODO IDanMZ talk to shai - this happens way too early
+                exe_name = config_vars.resolve_str("curl")  # TODO IDanMZ talk to shai - this happens way too early
+                # The curl --version output is
+                # curl 7.79.1 (x86_64-apple-darwin21.0) libcurl/7.79.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.11 nghttp2/1.45.1
+                # Release-Date: 2021-09-22
+                # Protocols: dict file ftp ftps gopher gophers http https imap imaps ldap ldaps mqtt pop3 pop3s rtsp smb smbs smtp smtps telnet tftp
+                # Features: alt-svc AsynchDNS GSS-API HSTS HTTP2 HTTPS-proxy IPv6 Kerberos Largefile libz MultiSSL NTLM NTLM_WB SPNEGO SSL UnixSockets
+                # So we take the fist line after the "curl" word
+
+                proc = subprocess.Popen(
+                    f"{exe_name} --version",
+                    shell=True,
+                    stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    universal_newlines=True)
+
+                match = re.search(r"curl\s+([0-9.]+)\s", proc.stdout.read())
+                if match is not None and len(match.groups()) > 0:
+                    curl_version = StrictVersion(match.group(1))
+                    min_version = StrictVersion(CUrlHelperParallel.min_supported_curl_version)
+                    if min_version > curl_version:
+                        log.info(f"legacy curl version {match.group(1)}")
+                    else:
+                        CUrlHelperParallel.cached_is_supported = True
+
+            except Exception as e:
+                log.info(f"Unable to detect version of curl, assuming legacy version.")
+                pass
+
         # probably "$(DOWNLOAD_TOOL_PATH)" --version
-        return True
+        return CUrlHelperParallel.cached_is_supported
 
     def get_num_of_urls_to_download(self):
         return len(self.urls_to_download)
@@ -91,13 +130,12 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
 
         max_files = str(max_files) if max_files is not None else "..."
 
-
         def parser(line):
             m = r.findall(line)
             if len(m) > 0 and len(m[0]) > 2:
                 downloaded_size, downloaded_files, download_speed = m[0]
                 downloaded_files = str(int(downloaded_files) + previous_count)
-                log.info(f"Download progress: {downloaded_files} of {max_files}; Downloaded {downloaded_size}, Speed {download_speed}.")
+                log.info(f"Progress: ... of ...; Downloading {downloaded_files} of {max_files}, Downloaded {downloaded_size}, Speed {download_speed}.")
 
         return parser
 

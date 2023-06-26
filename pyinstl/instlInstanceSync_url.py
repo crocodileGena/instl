@@ -103,7 +103,7 @@ class InstlInstanceSync_url(InstlInstanceSync):
                 # Download using combined file
                 for index, config_file in enumerate(config_file_list):
                     exe_name = config_vars.resolve_str("$(DOWNLOAD_TOOL_PATH)")
-                    parser = self.instlObj.dl_tool.stderr_parser(num_files_to_download, 0 if index ==0 else  self.instlObj.dl_tool.get_num_of_urls_to_download())
+                    parser = self.instlObj.dl_tool.stderr_parser(num_files_to_download, 0 if index == 0 else  self.instlObj.dl_tool.get_num_of_urls_to_download())
 
                     proc = subprocess.Popen(
                         f"{exe_name} --config '{self.get_normalized_path(config_file)}'",
