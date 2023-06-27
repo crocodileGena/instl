@@ -13,7 +13,7 @@ log = logging.getLogger()
 import utils
 from configVar import config_vars  # √
 from . import connectionBase
-
+from pybatch import ParallelRun, AnonymousAccum, MakeDir, Progress
 
 class CUrlHelper(object, metaclass=abc.ABCMeta):
     """ Create download commands. Each function should be overridden to implement the download
@@ -50,7 +50,7 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
         """  On Windows: to overcome cUrl inability to handle path with unicode chars, we try to calculate the windows
                 short path (DOS style 8.3 chars). The function that does that, win32api.GetShortPathName,
                 does not work for paths that do not yet exist so we need to also create the folder.
-                However if the creation requires admin permissions - it could fail -
+                However, if the creation requires admin permissions - it could fail -
                 in which case we revert to using the long path.
         """
 
@@ -58,8 +58,8 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
         if 'Win' in utils.get_current_os_names():
             # to overcome cUrl inability to handle path with unicode chars, we try to calculate the windows
             # short path (DOS style 8.3 chars). The function that does that, win32api.GetShortPathName,
-            # does not work for paths that do not yet exist so we need to also create the folder.
-            # However if the creation requires admin permissions - it could fail -
+            # does not work for paths that do not yet exist, so we need to also create the folder.
+            # However, if the creation requires admin permissions - it could fail -
             # in which case we revert to using the long path.
             import win32api
             fixed_path_parent = str(fixed_path.parent)
@@ -81,13 +81,6 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
         file_name_list = list()
 
         if self.get_num_urls_to_download() > 0:
-            connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
-            max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
-            retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
-            retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
-
-            sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
-
             actual_num_config_files = int(max(0, min(len(self.urls_to_download), num_config_files)))
             if self.urls_to_download_last:
                 actual_num_config_files += 1
@@ -103,28 +96,7 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
             # write the header in each file
             for wfd in wfd_list:
                 basename = os.path.basename(wfd.name)
-                if sync_urls_cookie:
-                    cookie_text = f"cookie = {sync_urls_cookie}\n"
-                else:
-                    cookie_text = ""
-                curl_write_out_str = CUrlHelper.curl_write_out_str
-                file_header_text = f"""
-insecure
-raw
-fail
-silent
-show-error
-compressed
-create-dirs
-connect-timeout = {connect_time_out}
-max-time = {max_time}
-retry = {retries}
-retry-delay = {retry_delay}
-{cookie_text}
-write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
-
-
-"""
+                file_header_text = self.get_config_header(basename)
                 wfd.write(file_header_text)
 
             last_file = None
@@ -159,3 +131,85 @@ write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
                 file_name_list.insert(-1, None)
 
         return file_name_list
+
+    def create_parallel_run_config_file(self, parallel_run_config_file_path, config_files):
+        with utils.utf8_open_for_write(parallel_run_config_file_path, "w") as wfd:
+            for config_file in config_files:
+                if config_file is None:  # None means to insert a wait
+                    wfd.write("wait\n")
+                else:
+                    normalized_path = self.get_normalized_path(config_file)
+                    wfd.write(config_vars.resolve_str(f'''"$(DOWNLOAD_TOOL_PATH)" --config "{normalized_path}"\n'''))
+
+        # same
+
+    def get_config_header(self, basename):
+        sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
+        connect_time_out = str(config_vars.setdefault("CURL_CONNECT_TIMEOUT", "16"))
+        max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
+        retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
+        retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
+
+        if sync_urls_cookie:
+            cookie_text = f"cookie = {sync_urls_cookie}\n"
+        else:
+            cookie_text = ""
+        curl_write_out_str = CUrlHelper.curl_write_out_str
+        file_header_text = f"""
+insecure
+raw
+fail
+silent
+show-error
+compressed
+create-dirs
+connect-timeout = {connect_time_out}
+max-time = {max_time}
+retry = {retries}
+retry-delay = {retry_delay}
+{cookie_text}
+write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
+"""
+        return file_header_text
+
+    def get_normalized_path(self, config_file):
+        # curl on windows has problem with path to config files that have unicode characters
+        return win32api.GetShortPathName(config_file) if sys.platform == 'win32' else config_file
+
+    def get_download_commands(self):
+        """ Download is done be creating files with instructions for curl - curl config files.
+                    Another file is created containing invocations of curl with each of the config files
+                    - the parallel run file.
+                    curl_config_folder: the folder where curl config files and parallel run file will be placed.
+                    num_config_files: the maximum number of curl config files.
+                    actual_num_config_files: actual number of curl config files created. Might be smaller
+                    than num_config_files, or might be 0 if downloading is not required.
+                """
+        dl_commands = AnonymousAccum()
+
+        main_outfile = config_vars["__MAIN_OUT_FILE__"].Path()
+        curl_config_folder = main_outfile.parent.joinpath(main_outfile.name + "_curl")
+        MakeDir(curl_config_folder, chowner=True, own_progress_count=0, report_own_progress=False)()
+        curl_config_file_path = curl_config_folder.joinpath(config_vars["CURL_CONFIG_FILE_NAME"].str())
+
+        num_config_files = int(config_vars["PARALLEL_SYNC"])
+        config_file_list = self.create_config_files(curl_config_file_path, num_config_files)
+
+        actual_num_config_files = len(config_file_list)
+        if actual_num_config_files > 0:
+            dl_commands += Progress(f"Downloading with {num_config_files} processes in parallel")
+
+            num_files_to_download = int(config_vars["__NUM_FILES_TO_DOWNLOAD__"])
+
+            parallel_run_config_file_path = curl_config_folder.joinpath(
+                config_vars.resolve_str("$(CURL_CONFIG_FILE_NAME).parallel-run"))
+            self.create_parallel_run_config_file(parallel_run_config_file_path, config_file_list)
+
+            dl_commands += ParallelRun(parallel_run_config_file_path, shell=False, action_name="Downloading",
+                               own_progress_count=num_files_to_download, report_own_progress=False)
+
+            dl_commands += Progress(f"Downloading {num_files_to_download} files done")
+
+        return dl_commands
+
+

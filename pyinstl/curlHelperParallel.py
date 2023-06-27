@@ -4,16 +4,19 @@ import abc
 import itertools
 import re
 import subprocess
+import sys
 from distutils.version import StrictVersion
 from pathlib import PurePath
 from re import compile, IGNORECASE
 import functools
 import logging
+
 log = logging.getLogger()
 
 import utils
 from configVar import config_vars  # √
 from . import connectionBase
+from pybatch import AnonymousAccum, Progress, MakeDir
 
 
 # TODO IdanMZ Add documentation, add lazy loading,
@@ -35,7 +38,6 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
         self.urls_to_download_last = list()
         self.short_win_paths_cache = dict()
 
-
     def add_download_url(self, url, path, verbatim=False, size=0, download_last=False):
         if verbatim:
             translated_url = url
@@ -56,7 +58,7 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
         """  On Windows: to overcome cUrl inability to handle path with unicode chars, we try to calculate the windows
                 short path (DOS style 8.3 chars). The function that does that, win32api.GetShortPathName,
                 does not work for paths that do not yet exist so we need to also create the folder.
-                However if the creation requires admin permissions - it could fail -
+                However, if the creation requires admin permissions - it could fail -
                 in which case we revert to using the long path.
         """
 
@@ -82,6 +84,65 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
             short_file_path = os.path.join(self.short_win_paths_cache[fixed_path_parent], fixed_path_name)
             fixed_path = short_file_path.replace("\\", "\\\\")
         return fixed_path
+
+    def create_config_files(self, curl_config_file_path, num_config_files):
+        file_name_list = list()
+
+        if self.get_num_urls_to_download() > 0:
+            actual_num_config_files = 1 if CUrlHelperParallel.is_supported() else int(
+                max(0, min(len(self.urls_to_download), num_config_files)))
+            if self.urls_to_download_last:
+                actual_num_config_files += 1
+            num_digits = max(len(str(actual_num_config_files)), 2)
+            file_name_list = ["-".join((os.fspath(curl_config_file_path), str(file_i).zfill(num_digits))) for file_i
+                              in range(actual_num_config_files)]
+
+            # open the files make sure they have r/w permissions and are utf-8
+            wfd_list = list()
+            for file_name in file_name_list:
+                wfd = utils.utf8_open_for_write(file_name, "w")
+                wfd_list.append(wfd)
+
+            # write the header in each file
+            for wfd in wfd_list:
+                basename = os.path.basename(wfd.name)
+                file_header_text = self.get_config_header(basename)
+                wfd.write(file_header_text)
+
+            last_file = None
+            if self.urls_to_download_last:
+                last_file = wfd_list.pop()
+
+            def url_sorter(l, r):
+                """ smaller files should be downloaded first so the progress bar gets moving early. """
+                return l[2] - r[2]  # non Info.xml files are sorted by size
+
+            wfd_cycler = itertools.cycle(wfd_list)
+            url_num = 0
+            sorted_by_size = self.urls_to_download # sorted(self.urls_to_download, key=functools.cmp_to_key(url_sorter))  # TODO IdanMZ - why?
+            for url, path, size in sorted_by_size:
+                fixed_path = self.fix_path(path)
+                wfd = next(wfd_cycler)
+                wfd.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
+                url_num += 1
+
+            for wfd in wfd_list:
+                wfd.close()
+
+            for url, path, size in self.urls_to_download_last:
+                fixed_path = self.fix_path(path)
+                last_file.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
+                url_num += 1
+
+            # insert None which means "wait" before the config file that downloads urls_to_download_last. but only if
+            # there were actually download files other than urls_to_download_last. it might happen that there are
+            # Note!
+            # only urls_to_download_last - so no need to "wait". if we use the embedded parallel option of curl -
+            # there will only be 2 files to execute the wait is built-in
+            if last_file and len(wfd_list) > 0 and not CUrlHelperParallel.is_supported():
+                file_name_list.insert(-1, None)
+
+        return file_name_list
 
     # TODO IdanMZ implement
     @staticmethod
@@ -121,9 +182,6 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
 
         # probably "$(DOWNLOAD_TOOL_PATH)" --version
         return CUrlHelperParallel.cached_is_supported
-
-    def get_num_of_urls_to_download(self):
-        return len(self.urls_to_download)
 
     def stderr_parser(self, max_files, previous_count = 0):
         r = compile(r'[0-9-]+\s+[0-9-]+\s+([a-z0-9.]+)\s+0\s+(\d+).+--:--:--\s+([0-9a-z.]+)\s*$', IGNORECASE)
@@ -174,60 +232,46 @@ retry-delay = {retry_delay}
 {write_out}
 """
 
+    # same
+    def get_normalized_path(self, config_file):
+        # curl on windows has problem with path to config files that have unicode characters
+        return win32api.GetShortPathName(config_file) if sys.platform == 'win32' else config_file
 
-    def create_config_files(self, curl_config_file_path, num_config_files):
-        file_name_list = list()
+    def get_download_commands(self):
+        dl_commands = AnonymousAccum()
 
-        if self.get_num_urls_to_download() > 0:
-            actual_num_config_files = 1 if CUrlHelperParallel.is_supported() else int(max(0, min(len(self.urls_to_download), num_config_files)))
-            if self.urls_to_download_last:
-                actual_num_config_files += 1
-            num_digits = max(len(str(actual_num_config_files)), 2)
-            file_name_list = ["-".join((os.fspath(curl_config_file_path), str(file_i).zfill(num_digits))) for file_i in range(actual_num_config_files)]
+        main_outfile = config_vars["__MAIN_OUT_FILE__"].Path()
+        curl_config_folder = main_outfile.parent.joinpath(main_outfile.name + "_curl_p")
+        MakeDir(curl_config_folder, chowner=True, own_progress_count=0, report_own_progress=False)()
+        curl_config_file_path = curl_config_folder.joinpath(config_vars["CURL_CONFIG_FILE_NAME"].str())
 
-            # open the files make sure they have r/w permissions and are utf-8
-            wfd_list = list()
-            for file_name in file_name_list:
-                wfd = utils.utf8_open_for_write(file_name, "w")
-                wfd_list.append(wfd)
+        # num_config_files = int(config_vars["PARALLEL_SYNC"])
+        num_config_files = 1
 
-            # write the header in each file
-            for wfd in wfd_list:
-                basename = os.path.basename(wfd.name)
-                file_header_text = self.get_config_header(basename)
-                wfd.write(file_header_text)
+        dl_commands += Progress("Downloading with 1 process (Parallel)")
+        config_file_list = self.create_config_files(curl_config_file_path, num_config_files)
 
-            last_file = None
-            if self.urls_to_download_last:
-                last_file = wfd_list.pop()
+        num_files_to_download = int(config_vars["__NUM_FILES_TO_DOWNLOAD__"])
 
-            def url_sorter(l, r):
-                """ smaller files should be downloaded first so the progress bar gets moving early. """
-                return l[2] - r[2]  # non Info.xml files are sorted by size
+        # Download using combined file
+        for index, config_file in enumerate(config_file_list):
+            exe_name = config_vars.resolve_str("$(DOWNLOAD_TOOL_PATH)")
+            parser = self.stderr_parser(self.get_num_urls_to_download(),
+                                                         0 if index == 0 else len(self.urls_to_download))
 
-            wfd_cycler = itertools.cycle(wfd_list)
-            url_num = 0
-            sorted_by_size = sorted(self.urls_to_download, key=functools.cmp_to_key(url_sorter)) # TODO IdanMZ - why?
-            for url, path, size in sorted_by_size:
-                fixed_path = self.fix_path(path)
-                wfd = next(wfd_cycler)
-                wfd.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
-                url_num += 1
+            proc = subprocess.Popen(
+                f"{exe_name} --config '{self.get_normalized_path(config_file)}'",
+                shell=True,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+            )
 
-            for wfd in wfd_list:
-                wfd.close()
+            # Read and process the stderr output line by line
+            for line in proc.stderr:
+                parser(line)
 
-            for url, path, size in self.urls_to_download_last:
-                fixed_path = self.fix_path(path)
-                last_file.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
-                url_num += 1
+            proc.wait()  # Wait for the process to complete
 
-            # insert None which means "wait" before the config file that downloads urls_to_download_last. but only if
-            # there were actually download files other than urls_to_download_last. it might happen that there are
-            # Note!
-            # only urls_to_download_last - so no need to "wait". if we use the embedded parallel option of curl -
-            # there will only be 2 files to execute the wait is built-in
-            if last_file and len(wfd_list) > 0 and not CUrlHelperParallel.is_supported():
-                file_name_list.insert(-1, None)
-
-        return file_name_list
+            # dl_commands += Subprocess("$(DOWNLOAD_TOOL_PATH)", "--config", self.get_normalized_path(config_file),
+            #                       stderr_means_err=False, stderr_parser=self.instlObj.dl_tool.stderr_parser)
+        return list()
