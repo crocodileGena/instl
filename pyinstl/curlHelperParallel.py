@@ -89,13 +89,11 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
         file_name_list = list()
 
         if self.get_num_urls_to_download() > 0:
-            actual_num_config_files = 1 if CUrlHelperParallel.is_supported() else int(
-                max(0, min(len(self.urls_to_download), num_config_files)))
+            actual_num_config_files = int(max(0, min(len(self.urls_to_download), num_config_files)))
             if self.urls_to_download_last:
                 actual_num_config_files += 1
             num_digits = max(len(str(actual_num_config_files)), 2)
-            file_name_list = ["-".join((os.fspath(curl_config_file_path), str(file_i).zfill(num_digits))) for file_i
-                              in range(actual_num_config_files)]
+            file_name_list = ["-".join((os.fspath(curl_config_file_path), str(file_i).zfill(num_digits))) for file_i in range(actual_num_config_files)]
 
             # open the files make sure they have r/w permissions and are utf-8
             wfd_list = list()
@@ -134,17 +132,9 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
                 last_file.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
                 url_num += 1
 
-            # insert None which means "wait" before the config file that downloads urls_to_download_last. but only if
-            # there were actually download files other than urls_to_download_last. it might happen that there are
-            # Note!
-            # only urls_to_download_last - so no need to "wait". if we use the embedded parallel option of curl -
-            # there will only be 2 files to execute the wait is built-in
-            if last_file and len(wfd_list) > 0 and not CUrlHelperParallel.is_supported():
-                file_name_list.insert(-1, None)
-
         return file_name_list
 
-    # TODO IdanMZ implement
+
     @staticmethod
     def is_supported():
         if CUrlHelperParallel.cached_is_supported is None:
@@ -183,19 +173,60 @@ class CUrlHelperParallel(object, metaclass=abc.ABCMeta):
         # probably "$(DOWNLOAD_TOOL_PATH)" --version
         return CUrlHelperParallel.cached_is_supported
 
+
+
     def stderr_parser(self, max_files, previous_count = 0):
         r = compile(r'[0-9-]+\s+[0-9-]+\s+([a-z0-9.]+)\s+0\s+(\d+).+--:--:--\s+([0-9a-z.]+)\s*$', IGNORECASE)
 
         max_files = str(max_files) if max_files is not None else "..."
+
+        # converts from bytes to a human-readable string - should match Central's representation
+        def bytes_to_string(number):
+            suffixes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
+            magnitude = 0
+
+            if number == 0:
+                return "0"
+
+            while number >= 1024 and magnitude < len(suffixes) - 1:
+                number /= 1024
+                magnitude += 1
+
+            decimal_places = 2 if magnitude > 0 else 0
+            formatted_number = "{:.{}f}".format(number, decimal_places)
+
+            return f"{formatted_number}{suffixes[magnitude]}"
+
+        # converts from curl string output 30M 10.2K 12B to the same format we use in bytes_to_string
+        def curl_size_string_to_byte_string(str):
+            m = re.findall(r"([0-9.]+)([a-zA-Z])?", str)
+
+            if len(m) > 0 and len(m[0]) >= 1:
+                size, magnitude = m[0]
+
+                if not magnitude:
+                    magnitude = "" if size == 0 else "B"
+                else:
+                    magnitude = magnitude.upper()
+                    magnitude = magnitude if magnitude == "B" else (magnitude + "B")
+
+                return f"{size}{magnitude}"
+
+            return "0"
+
+        bytes_to_download = bytes_to_string(config_vars['__NUM_BYTES_TO_DOWNLOAD__'].int())
 
         def parser(line):
             m = r.findall(line)
             if len(m) > 0 and len(m[0]) > 2:
                 downloaded_size, downloaded_files, download_speed = m[0]
                 downloaded_files = str(int(downloaded_files) + previous_count)
-                log.info(f"Progress: ... of ...; Downloading {downloaded_files} of {max_files}, Downloaded {downloaded_size}, Speed {download_speed}.")
+                downloaded_size = curl_size_string_to_byte_string(downloaded_size)
+                download_speed = curl_size_string_to_byte_string(download_speed)
+                log.info(f"Progress: ... of ...; Downloading {downloaded_files} of {max_files}, Downloaded {downloaded_size} of {bytes_to_download}, Speed {download_speed}.")
 
         return parser
+
 
 
     def get_config_header(self, basename):
@@ -232,7 +263,6 @@ retry-delay = {retry_delay}
 {write_out}
 """
 
-    # same
     def get_normalized_path(self, config_file):
         # curl on windows has problem with path to config files that have unicode characters
         return win32api.GetShortPathName(config_file) if sys.platform == 'win32' else config_file
@@ -274,4 +304,7 @@ retry-delay = {retry_delay}
 
             # dl_commands += Subprocess("$(DOWNLOAD_TOOL_PATH)", "--config", self.get_normalized_path(config_file),
             #                       stderr_means_err=False, stderr_parser=self.instlObj.dl_tool.stderr_parser)
+
+        if num_files_to_download > 0:
+            dl_commands += Progress(f"Downloading {num_files_to_download} files done")
         return list()

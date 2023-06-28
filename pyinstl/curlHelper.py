@@ -124,13 +124,8 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
                 last_file.write(f'''url = "{url}"\noutput = "{fixed_path}"\n\n''')
                 url_num += 1
 
-            # insert None which means "wait" before the config file that downloads urls_to_download_last.
-            # but only if there were actually download files other than urls_to_download_last.
-            # it might happen that there are only urls_to_download_last - so no need to "wait".
-            if last_file and len(wfd_list) > 0:
-                file_name_list.insert(-1, None)
-
         return file_name_list
+
 
     def create_parallel_run_config_file(self, parallel_run_config_file_path, config_files):
         with utils.utf8_open_for_write(parallel_run_config_file_path, "w") as wfd:
@@ -141,7 +136,6 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
                     normalized_path = self.get_normalized_path(config_file)
                     wfd.write(config_vars.resolve_str(f'''"$(DOWNLOAD_TOOL_PATH)" --config "{normalized_path}"\n'''))
 
-        # same
 
     def get_config_header(self, basename):
         sync_urls_cookie = str(config_vars.get("COOKIE_FOR_SYNC_URLS", ""))
@@ -149,13 +143,9 @@ class CUrlHelper(object, metaclass=abc.ABCMeta):
         max_time = str(config_vars.setdefault("CURL_MAX_TIME", "180"))
         retries = str(config_vars.setdefault("CURL_RETRIES", "2"))
         retry_delay = str(config_vars.setdefault("CURL_RETRY_DELAY", "8"))
+        cookie_text = f"cookie = {sync_urls_cookie}\n" if sync_urls_cookie else ""
 
-        if sync_urls_cookie:
-            cookie_text = f"cookie = {sync_urls_cookie}\n"
-        else:
-            cookie_text = ""
-        curl_write_out_str = CUrlHelper.curl_write_out_str
-        file_header_text = f"""
+        return f"""
 insecure
 raw
 fail
@@ -168,9 +158,9 @@ max-time = {max_time}
 retry = {retries}
 retry-delay = {retry_delay}
 {cookie_text}
-write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
+write-out = "Progress: ... of ...; {basename}: {self.curl_write_out_str}"
 """
-        return file_header_text
+
 
     def get_normalized_path(self, config_file):
         # curl on windows has problem with path to config files that have unicode characters
@@ -194,6 +184,11 @@ write-out = "Progress: ... of ...; {basename}: {curl_write_out_str}"
 
         num_config_files = int(config_vars["PARALLEL_SYNC"])
         config_file_list = self.create_config_files(curl_config_file_path, num_config_files)
+        # insert None which means "wait" before the config file that downloads urls_to_download_last.
+        # but only if there were actually download files other than urls_to_download_last.
+        # it might happen that there are only urls_to_download_last - so no need to "wait".
+        if len(self.urls_to_download_last) > 0 and len(config_file_list) > 0:
+            config_file_list.insert(-1, None)
 
         actual_num_config_files = len(config_file_list)
         if actual_num_config_files > 0:
